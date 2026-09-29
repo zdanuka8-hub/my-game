@@ -107,6 +107,7 @@ object EuropeScenario {
 
     fun canonicalName(id: Int): String = canonicalNames[id.coerceIn(0, COUNTRY_COUNT - 1)]
     fun canonicalTag(id: Int): String = canonicalTags[id.coerceIn(0, COUNTRY_COUNT - 1)]
+    fun canonicalColor(id: Int): Int = canonicalColors[id.coerceIn(0, COUNTRY_COUNT - 1)]
 
     fun build(
         map: Array<Array<Province>>,
