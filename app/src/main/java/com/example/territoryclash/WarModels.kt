@@ -27,7 +27,10 @@ data class Province(
     var fort: Int = 0,
     var city: Boolean = false,
     var port: Boolean = false,
-    var silo: Boolean = false
+    var silo: Boolean = false,
+    var regionId: Int = -1,
+    var industry: Int = 0,
+    var infrastructure: Int = 1
 )
 
 data class Division(
@@ -65,4 +68,22 @@ data class Battle(
     val attackers: MutableList<Int> = mutableListOf(),
     var progress: Float = 0f,
     var age: Float = 0f
+)
+
+
+data class HistoricalEvent(
+    val day: Int,
+    val title: String,
+    val body: String,
+    val effect: String = "",
+    var shown: Boolean = false
+)
+
+data class GameSettings(
+    var uiScale: Float = 1.0f,
+    var showProvinceBorders: Boolean = true,
+    var showTerrainTexture: Boolean = true,
+    var showUnitLabels: Boolean = true,
+    var showCountryLabels: Boolean = true,
+    var compactCounters: Boolean = false
 )
