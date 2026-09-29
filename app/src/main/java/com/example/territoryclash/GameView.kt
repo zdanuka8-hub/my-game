@@ -37,6 +37,12 @@ class GameView(
     private var selectedCountry = EuropeScenario.GERMANY
     private var menuMusicOn = true
 
+    private val settings = GameSettings()
+    private var activePanel = 0
+    private var settingsOpen = false
+    private var currentEvent: HistoricalEvent? = null
+    private val historicalEvents = mutableListOf<HistoricalEvent>()
+
     companion object {
         private const val SCREEN_MAIN_MENU = 0
         private const val SCREEN_COUNTRY_SELECT = 1
@@ -84,6 +90,34 @@ class GameView(
         speedIndex = 1
         nukeTargetMode = false
         gameOver = null
+        activePanel = 0
+        settingsOpen = false
+        currentEvent = null
+        historicalEvents.clear()
+        historicalEvents += HistoricalEvent(
+            67,
+            "Ремилитаризация Рейнской области",
+            "7 марта 1936 года германские войска вошли в демилитаризованную Рейнскую область.",
+            "Напряжённость в Западной Европе растёт."
+        )
+        historicalEvents += HistoricalEvent(
+            199,
+            "Гражданская война в Испании",
+            "17 июля 1936 года военный мятеж в Испании перерос в гражданскую войну.",
+            "Испанский фронт становится нестабильным."
+        )
+        historicalEvents += HistoricalEvent(
+            802,
+            "Аншлюс Австрии",
+            "В марте 1938 года Австрия была присоединена к Германии.",
+            "Баланс сил в Центральной Европе меняется."
+        )
+        historicalEvents += HistoricalEvent(
+            1003,
+            "Мюнхенское соглашение",
+            "29–30 сентября 1938 года было заключено Мюнхенское соглашение по Судетской области.",
+            "Чехословацкая граница оказывается под новым давлением."
+        )
 
         for (i in 0 until nations) {
             nation[i] = NationState(
@@ -240,6 +274,7 @@ class GameView(
             val passed = (dayClock / 2.2f).toInt()
             day += passed
             dayClock -= passed * 2.2f
+            checkHistoricalEvents()
         }
 
         economyClock += dt
@@ -768,20 +803,21 @@ class GameView(
         canvas.drawColor(Color.rgb(23, 28, 32))
 
         val top = 66f
-        val bottomPanel = 148f
+        val bottomPanel = 184f
         val mapBottom = height - bottomPanel
         val cw = width / cols.toFloat()
         val ch = (mapBottom - top) / rows.toFloat()
 
         drawTopBar(canvas)
         drawMap(canvas, top, mapBottom, cw, ch)
-        drawProvinceBorders(canvas, top, cw, ch)
-        drawCountryLabels(canvas, top, cw, ch)
+        if (settings.showProvinceBorders) drawProvinceBorders(canvas, top, cw, ch)
+        if (settings.showCountryLabels) drawCountryLabels(canvas, top, cw, ch)
         drawFrontLines(canvas, top, cw, ch)
         drawBattles(canvas, top, cw, ch)
         drawDivisions(canvas, top, cw, ch)
         drawCursor(canvas, top, cw, ch)
         drawBottomPanel(canvas, mapBottom)
+        drawEventOverlay(canvas)
 
         gameOver?.let {
             paint.style = Paint.Style.FILL
@@ -1083,7 +1119,7 @@ class GameView(
                 paint.color = provinceColor(p)
                 canvas.drawRect(left, t, left + cw + 0.5f, t + ch + 0.5f, paint)
 
-                drawTerrainTexture(canvas, p, left, t, cw, ch)
+                if (settings.showTerrainTexture) drawTerrainTexture(canvas, p, left, t, cw, ch)
 
                 drawProvinceStructures(canvas, p, left, t, cw, ch)
             }
@@ -1418,137 +1454,258 @@ class GameView(
 
     private fun drawBottomPanel(canvas: Canvas, mapBottom: Float) {
         paint.style = Paint.Style.FILL
-        paint.color = Color.rgb(25, 31, 35)
+        paint.color = Color.rgb(24, 29, 33)
         canvas.drawRect(0f, mapBottom, width.toFloat(), height.toFloat(), paint)
 
-        paint.color = Color.rgb(50, 59, 65)
+        paint.color = Color.rgb(57, 66, 70)
         canvas.drawRect(0f, mapBottom, width.toFloat(), mapBottom + 2f, paint)
 
-        val selected = selectedDivisions()
-        val infoW = width * 0.38f
+        val tabs = arrayOf("АРМИЯ", "СТРОИТЕЛЬСТВО", "ПРОИЗВОДСТВО", "СОБЫТИЯ", "НАСТРОЙКИ")
+        val tabW = width / tabs.size.toFloat()
+
+        for (i in tabs.indices) {
+            paint.style = Paint.Style.FILL
+            paint.color = if (i == activePanel) Color.rgb(62, 75, 80) else Color.rgb(34, 41, 45)
+            canvas.drawRect(i * tabW, mapBottom + 3f, (i + 1) * tabW - 2f, mapBottom + 37f, paint)
+
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 11.5f * settings.uiScale
+            text.color = if (i == activePanel) Color.WHITE else Color.rgb(166, 177, 182)
+            canvas.drawText(tabs[i], i * tabW + tabW / 2f, mapBottom + 25f, text)
+        }
+
+        when (activePanel) {
+            0 -> drawArmyPanel(canvas, mapBottom + 42f)
+            1 -> drawConstructionPanel(canvas, mapBottom + 42f)
+            2 -> drawProductionPanel(canvas, mapBottom + 42f)
+            3 -> drawEventsPanel(canvas, mapBottom + 42f)
+            4 -> drawSettingsPanel(canvas, mapBottom + 42f)
+        }
 
         text.textAlign = Paint.Align.LEFT
-        text.color = Color.rgb(230, 234, 236)
-        text.textSize = 15f
-        text.isFakeBoldText = true
+        text.textSize = 11.5f * settings.uiScale
+        text.color = if (statusTimer > 0f) Color.rgb(210, 219, 226) else Color.rgb(145, 156, 162)
+        canvas.drawText(
+            if (statusTimer > 0f) status else "ЛКМ — выбрать/приказать • ПКМ — снять выделение под курсором • Esc — снять всё • Back — меню",
+            12f,
+            height - 10f,
+            text
+        )
+    }
 
-        val title = if (selected.isEmpty()) {
-            "ПРОВИНЦИЯ"
-        } else {
-            "ВЫБРАНО ДИВИЗИЙ: ${selected.size}"
-        }
-        canvas.drawText(title, 14f, mapBottom + 25f, text)
+    private fun drawArmyPanel(canvas: Canvas, top: Float) {
+        val selected = selectedDivisions()
+        text.textAlign = Paint.Align.LEFT
+        text.color = Color.rgb(226, 231, 233)
+        text.textSize = 13.5f * settings.uiScale
+        text.isFakeBoldText = true
+        canvas.drawText(
+            if (selected.isEmpty()) "ШТАБ СУХОПУТНЫХ ВОЙСК" else "ВЫБРАНО: ${selected.size} дивизий",
+            12f,
+            top + 22f,
+            text
+        )
         text.isFakeBoldText = false
 
-        text.textSize = 13f
-        text.color = Color.rgb(177, 190, 198)
+        text.textSize = 11.5f * settings.uiScale
+        text.color = Color.rgb(166, 180, 188)
 
         if (selected.isEmpty()) {
-            val p = selectedProvince()
-            if (p != null) {
-                val terrain = when (p.terrain) {
-                    WarRules.PLAINS -> "равнина"
-                    WarRules.FOREST -> "лес"
-                    WarRules.HILLS -> "холмы"
-                    else -> "вода"
-                }
-
-                canvas.drawText(
-                    "Местность: $terrain   Владелец: ${ownerName(p.owner)}   Гарнизон: ${p.garrison.toInt()}   Форт: ${p.fort}",
-                    14f,
-                    mapBottom + 48f,
-                    text
-                )
-
-                canvas.drawText(
-                    "Снабжение: ${(supplyLevel(0, selectedProvinceX, selectedProvinceY) * 100).toInt()}%   Город: ${if (p.city) "да" else "нет"}   Порт: ${if (p.port) "да" else "нет"}",
-                    14f,
-                    mapBottom + 69f,
-                    text
-                )
-            } else {
-                canvas.drawText("Тапни по своей провинции или дивизии.", 14f, mapBottom + 48f, text)
-            }
+            canvas.drawText(
+                "Выбери контры дивизий на карте. Для приказа оставь их выбранными и нажми на провинцию.",
+                12f,
+                top + 45f,
+                text
+            )
         } else {
-            val avgStrength = selected.map { it.strength }.average().toFloat()
-            val avgOrg = selected.map { it.org }.average().toFloat()
-            val avgSupply = selected.map { supplyLevel(it.owner, it.x, it.y) }.average().toFloat()
             val inf = selected.count { it.type == WarRules.INFANTRY }
             val arm = selected.count { it.type == WarRules.ARMOR }
             val air = selected.count { it.type == WarRules.AIR }
-
-            canvas.drawText(
-                "Пехота $inf   Танки $arm   Авиация $air   Сила ${avgStrength.toInt()}%   Организация ${avgOrg.toInt()}%   Снабжение ${(avgSupply * 100).toInt()}%",
-                14f,
-                mapBottom + 48f,
-                text
-            )
-
-            canvas.drawText(
-                "Тап по своей провинции — перемещение. Тап по чужой — подготовка/атака. Авиация получает воздушную миссию.",
-                14f,
-                mapBottom + 69f,
-                text
-            )
+            val org = selected.map { it.org }.average().toInt()
+            val str = selected.map { it.strength }.average().toInt()
+            canvas.drawText("INF $inf   ARM $arm   AIR $air   организация $org%   сила $str%", 12f, top + 45f, text)
         }
 
-        val buttons = arrayOf(
-            "ПЕХОТА",
-            "ТАНКИ",
-            "АВИАЦИЯ",
-            "ФОРТ",
-            "ГОРОД",
-            "ПОРТ",
-            if (nation[0].nukes > 0) "☢ ЦЕЛЬ" else "ШАХТА/☢",
-            if (music.muted) "МУЗ OFF" else "МУЗ ON"
+        drawActionButtons(
+            canvas,
+            top + 57f,
+            arrayOf("ПЕХОТА", "ТАНКИ", "АВИАЦИЯ", "СНЯТЬ ВЫБОР"),
+            arrayOf("6k / 120", "4k / 70", "1k / 45", "")
         )
+    }
 
-        val buttonStart = max(infoW, width * 0.39f)
-        val buttonW = (width - buttonStart - 8f) / buttons.size
-        val y1 = mapBottom + 12f
-        val y2 = height - 38f
-
-        for (i in buttons.indices) {
-            val x1 = buttonStart + i * buttonW
-            val x2 = x1 + buttonW - 4f
-
-            paint.style = Paint.Style.FILL
-            paint.color = when {
-                i == 6 && nukeTargetMode -> Color.rgb(105, 66, 43)
-                i == 7 && !music.muted -> Color.rgb(41, 71, 59)
-                else -> Color.rgb(41, 49, 54)
-            }
-            canvas.drawRoundRect(x1, y1, x2, y2, 5f, 5f, paint)
-
-            text.textAlign = Paint.Align.CENTER
-            text.textSize = 11.5f
-            text.color = Color.rgb(225, 229, 232)
-            canvas.drawText(buttons[i], (x1 + x2) / 2f, y1 + 24f, text)
-
-            text.textSize = 9.5f
-            text.color = Color.rgb(151, 165, 174)
-            val cost = when (i) {
-                0 -> "6k ЛС / 120 винт."
-                1 -> "4k ЛС / 70 танк."
-                2 -> "1k ЛС / 45 самол."
-                3 -> "$${WarRules.COST_FORT}"
-                4 -> "$${WarRules.COST_CITY}"
-                5 -> "$${WarRules.COST_PORT}"
-                6 -> if (nation[0].nukes > 0) "готово" else "$${WarRules.COST_SILO}+"
-                else -> ""
-            }
-            canvas.drawText(cost, (x1 + x2) / 2f, y1 + 43f, text)
+    private fun drawConstructionPanel(canvas: Canvas, top: Float) {
+        val p = selectedProvince()
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = 12f * settings.uiScale
+        text.color = Color.rgb(183, 194, 200)
+        if (p != null) {
+            canvas.drawText(
+                "Провинция: ${ownerName(p.owner)}   инфраструктура ${p.infrastructure}/5   промышленность ${p.industry}/5   форт ${p.fort}/5",
+                12f,
+                top + 25f,
+                text
+            )
+        } else {
+            canvas.drawText("Выбери свою провинцию для строительства.", 12f, top + 25f, text)
         }
 
+        drawActionButtons(
+            canvas,
+            top + 43f,
+            arrayOf("ФОРТ", "ГОРОД", "ПОРТ", "ИНФРА +", "ЗАВОД +"),
+            arrayOf("$${WarRules.COST_FORT}", "$${WarRules.COST_CITY}", "$${WarRules.COST_PORT}", "$120", "$170")
+        )
+    }
+
+    private fun drawProductionPanel(canvas: Canvas, top: Float) {
+        val s = nation[0]
         text.textAlign = Paint.Align.LEFT
-        text.textSize = 12.5f
-        text.color = if (statusTimer > 0f) Color.rgb(210, 219, 226) else Color.rgb(150, 160, 166)
+        text.textSize = 12f * settings.uiScale
+        text.color = Color.rgb(187, 198, 203)
         canvas.drawText(
-            if (statusTimer > 0f) status else "Space — выбрать/приказать • Esc — снять выделение • 1/2/3 — подготовить дивизию • R — рестарт",
-            14f,
-            height - 13f,
+            "ЛС ${String.format("%.1f", s.manpower)}k   винтовки ${s.equipment.toInt()}   танки ${s.tanks.toInt()}   самолёты ${s.aircraft.toInt()}   топливо ${s.fuel.toInt()}",
+            12f,
+            top + 25f,
             text
         )
+
+        drawActionButtons(
+            canvas,
+            top + 43f,
+            arrayOf("СФОРМИРОВАТЬ INF", "СФОРМИРОВАТЬ ARM", "СФОРМИРОВАТЬ AIR", if (s.nukes > 0) "☢ ВЫБРАТЬ ЦЕЛЬ" else "ШАХТА / ☢"),
+            arrayOf("120 винтовок", "70 танков", "45 самолётов", "$${WarRules.COST_SILO}+")
+        )
+    }
+
+    private fun drawEventsPanel(canvas: Canvas, top: Float) {
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = 12.5f * settings.uiScale
+        text.color = Color.rgb(215, 221, 224)
+        canvas.drawText("ХРОНИКА КАМПАНИИ", 12f, top + 23f, text)
+
+        text.textSize = 10.8f * settings.uiScale
+        text.color = Color.rgb(159, 172, 178)
+        val shown = historicalEvents.filter { it.shown }.takeLast(4)
+        if (shown.isEmpty()) {
+            canvas.drawText("Исторические события будут появляться по ходу времени.", 12f, top + 46f, text)
+        } else {
+            shown.forEachIndexed { i, e ->
+                canvas.drawText("День ${e.day}: ${e.title}", 12f, top + 46f + i * 18f, text)
+            }
+        }
+    }
+
+    private fun drawSettingsPanel(canvas: Canvas, top: Float) {
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = 11.8f * settings.uiScale
+        text.color = Color.rgb(181, 194, 201)
+        canvas.drawText(
+            "Масштаб UI: ${String.format("%.1f", settings.uiScale)}   границы провинций: ${if (settings.showProvinceBorders) "да" else "нет"}   рельеф: ${if (settings.showTerrainTexture) "да" else "нет"}",
+            12f,
+            top + 24f,
+            text
+        )
+
+        drawActionButtons(
+            canvas,
+            top + 43f,
+            arrayOf("UI −", "UI +", "ГРАНИЦЫ", "РЕЛЬЕФ", "ПОДПИСИ", if (music.muted) "МУЗЫКА OFF" else "МУЗЫКА ON"),
+            arrayOf("", "", "", "", "", "")
+        )
+    }
+
+    private fun drawActionButtons(
+        canvas: Canvas,
+        top: Float,
+        labels: Array<String>,
+        sublabels: Array<String>
+    ) {
+        val gap = 5f
+        val left = 12f
+        val usable = width - 24f
+        val bw = (usable - gap * (labels.size - 1)) / labels.size
+
+        for (i in labels.indices) {
+            val x1 = left + i * (bw + gap)
+            val x2 = x1 + bw
+
+            paint.style = Paint.Style.FILL
+            paint.color = Color.rgb(42, 51, 56)
+            canvas.drawRoundRect(x1, top, x2, top + 49f, 5f, 5f, paint)
+
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.8f
+            paint.color = Color.rgb(75, 87, 92)
+            canvas.drawRoundRect(x1, top, x2, top + 49f, 5f, 5f, paint)
+
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 10.7f * settings.uiScale
+            text.color = Color.rgb(229, 232, 233)
+            canvas.drawText(labels[i], (x1 + x2) / 2f, top + 20f, text)
+
+            if (sublabels[i].isNotEmpty()) {
+                text.textSize = 9.3f * settings.uiScale
+                text.color = Color.rgb(148, 162, 169)
+                canvas.drawText(sublabels[i], (x1 + x2) / 2f, top + 38f, text)
+            }
+        }
+    }
+
+    private fun checkHistoricalEvents() {
+        if (currentEvent != null) return
+        val event = historicalEvents.firstOrNull { !it.shown && day >= it.day } ?: return
+        event.shown = true
+        currentEvent = event
+        speedIndex = 0
+
+        when (event.day) {
+            67 -> nation[0].money += 35f
+            199 -> nation[0].fuel += 60f
+            802 -> nation[0].equipment += 90f
+            1003 -> nation[0].money += 50f
+        }
+    }
+
+    private fun drawEventOverlay(canvas: Canvas) {
+        val event = currentEvent ?: return
+
+        paint.style = Paint.Style.FILL
+        paint.color = Color.argb(190, 7, 10, 12)
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+
+        val w = min(width * 0.72f, 700f)
+        val h = 230f
+        val left = width / 2f - w / 2f
+        val top = height / 2f - h / 2f
+
+        paint.color = Color.rgb(35, 42, 46)
+        canvas.drawRoundRect(left, top, left + w, top + h, 10f, 10f, paint)
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.4f
+        paint.color = Color.rgb(104, 113, 115)
+        canvas.drawRoundRect(left, top, left + w, top + h, 10f, 10f, paint)
+
+        text.textAlign = Paint.Align.CENTER
+        text.color = Color.rgb(236, 234, 224)
+        text.textSize = 21f * settings.uiScale
+        text.isFakeBoldText = true
+        canvas.drawText(event.title, width / 2f, top + 45f, text)
+        text.isFakeBoldText = false
+
+        text.textSize = 12.5f * settings.uiScale
+        text.color = Color.rgb(188, 199, 203)
+        canvas.drawText(event.body, width / 2f, top + 83f, text)
+        canvas.drawText(event.effect, width / 2f, top + 111f, text)
+
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(66, 80, 85)
+        canvas.drawRoundRect(left + w * 0.30f, top + 158f, left + w * 0.70f, top + 205f, 6f, 6f, paint)
+
+        text.textSize = 13f * settings.uiScale
+        text.color = Color.WHITE
+        canvas.drawText("ПРОДОЛЖИТЬ", width / 2f, top + 188f, text)
     }
 
     private fun ownerName(owner: Int): String = when {
@@ -1573,12 +1730,19 @@ class GameView(
             return true
         }
 
+        if (currentEvent != null) {
+            currentEvent = null
+            speedIndex = 1
+            invalidate()
+            return true
+        }
+
         if (event.y <= 66f) {
             handleTopTouch(event.x)
             return true
         }
 
-        val mapBottom = height - 148f
+        val mapBottom = height - 184f
         if (event.y >= mapBottom) {
             handleBottomTouch(event.x, event.y, mapBottom)
             return true
@@ -1614,22 +1778,95 @@ class GameView(
     }
 
     private fun handleBottomTouch(x: Float, y: Float, mapBottom: Float) {
-        val infoW = max(width * 0.38f, width * 0.39f)
-        if (x < infoW || y > height - 38f) return
-
-        val buttonW = (width - infoW - 8f) / 8f
-        val index = ((x - infoW) / buttonW).toInt().coerceIn(0, 7)
-
-        when (index) {
-            0 -> playerTrain(WarRules.INFANTRY)
-            1 -> playerTrain(WarRules.ARMOR)
-            2 -> playerTrain(WarRules.AIR)
-            3 -> buildFort()
-            4 -> buildCity()
-            5 -> buildPort()
-            6 -> nuclearButton()
-            7 -> flash(if (music.toggle()) "Музыка включена" else "Музыка выключена")
+        val tabW = width / 5f
+        if (y <= mapBottom + 39f) {
+            activePanel = (x / tabW).toInt().coerceIn(0, 4)
+            return
         }
+
+        val contentTop = mapBottom + 99f
+
+        val count = when (activePanel) {
+            0 -> 4
+            1 -> 5
+            2 -> 4
+            3 -> 0
+            else -> 6
+        }
+        if (count == 0) return
+        if (y !in contentTop..(contentTop + 54f)) return
+
+        val left = 12f
+        val gap = 5f
+        val usable = width - 24f
+        val bw = (usable - gap * (count - 1)) / count
+        val index = ((x - left) / (bw + gap)).toInt().coerceIn(0, count - 1)
+
+        when (activePanel) {
+            0 -> when (index) {
+                0 -> playerTrain(WarRules.INFANTRY)
+                1 -> playerTrain(WarRules.ARMOR)
+                2 -> playerTrain(WarRules.AIR)
+                3 -> {
+                    clearSelection()
+                    flash("Выделение снято.")
+                }
+            }
+
+            1 -> when (index) {
+                0 -> buildFort()
+                1 -> buildCity()
+                2 -> buildPort()
+                3 -> upgradeInfrastructure()
+                4 -> upgradeIndustry()
+            }
+
+            2 -> when (index) {
+                0 -> playerTrain(WarRules.INFANTRY)
+                1 -> playerTrain(WarRules.ARMOR)
+                2 -> playerTrain(WarRules.AIR)
+                3 -> nuclearButton()
+            }
+
+            4 -> when (index) {
+                0 -> settings.uiScale = max(0.8f, settings.uiScale - 0.1f)
+                1 -> settings.uiScale = min(1.3f, settings.uiScale + 0.1f)
+                2 -> settings.showProvinceBorders = !settings.showProvinceBorders
+                3 -> settings.showTerrainTexture = !settings.showTerrainTexture
+                4 -> settings.showCountryLabels = !settings.showCountryLabels
+                5 -> music.toggle()
+            }
+        }
+    }
+
+    private fun upgradeInfrastructure() {
+        val p = selectedOwnedProvince() ?: return
+        if (p.infrastructure >= 5) {
+            flash("Инфраструктура уже максимального уровня.")
+            return
+        }
+        if (nation[0].money < 120f) {
+            flash("Нужно $120.")
+            return
+        }
+        nation[0].money -= 120f
+        p.infrastructure++
+        flash("Инфраструктура улучшена до ${p.infrastructure}/5.")
+    }
+
+    private fun upgradeIndustry() {
+        val p = selectedOwnedProvince() ?: return
+        if (p.industry >= 5) {
+            flash("Промышленность уже максимального уровня.")
+            return
+        }
+        if (nation[0].money < 170f) {
+            flash("Нужно $170.")
+            return
+        }
+        nation[0].money -= 170f
+        p.industry++
+        flash("Промышленность улучшена до ${p.industry}/5.")
     }
 
     private fun handleProvinceTap(x: Int, y: Int) {
