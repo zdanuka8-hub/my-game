@@ -7,7 +7,7 @@ import android.view.WindowManager
 
 class MainActivity : Activity() {
     private lateinit var music: BackgroundMusic
-    private lateinit var gameView: GameView
+    private lateinit var gameView: VectorGameView
 
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -23,7 +23,7 @@ class MainActivity : Activity() {
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
 
         music = BackgroundMusic()
-        gameView = GameView(this, music)
+        gameView = VectorGameView(this, music)
         setContentView(gameView)
     }
 
