@@ -302,14 +302,38 @@ class GameView(
 
             val cities = countCities(owner)
             val ports = countPorts(owner)
+            var industry = 0
+            var infrastructure = 0
+            var owned = 0
 
+            for (row in map) {
+                for (p in row) {
+                    if (p.owner != owner) continue
+                    industry += p.industry
+                    infrastructure += p.infrastructure
+                    owned++
+                }
+            }
+
+            val avgInfra = if (owned > 0) infrastructure.toFloat() / owned else 1f
             val s = nation[owner]
-            s.money += dt * (4.0f + cities * 5.0f + provinceCount(owner) * 0.22f)
-            s.manpower = min(130f, s.manpower + dt * (0.025f + cities * 0.055f))
-            s.equipment += dt * (2.0f + cities * 1.8f)
-            s.tanks += dt * (0.20f + cities * 0.22f)
-            s.aircraft += dt * (0.15f + cities * 0.18f)
-            s.fuel += dt * (1.2f + ports * 1.1f + provinceCount(owner) * 0.035f)
+
+            s.money += dt * (
+                2.5f +
+                    cities * 4.2f +
+                    industry * 1.15f +
+                    provinceCount(owner) * 0.055f
+                )
+
+            s.manpower = min(
+                160f,
+                s.manpower + dt * (0.018f + cities * 0.045f + provinceCount(owner) * 0.0018f)
+            )
+
+            s.equipment += dt * (0.9f + industry * 0.62f) * (0.70f + avgInfra * 0.08f)
+            s.tanks += dt * (0.08f + industry * 0.075f) * (0.65f + avgInfra * 0.07f)
+            s.aircraft += dt * (0.06f + industry * 0.065f) * (0.65f + avgInfra * 0.07f)
+            s.fuel += dt * (0.55f + ports * 0.75f + avgInfra * 0.15f)
         }
     }
 
@@ -644,28 +668,35 @@ class GameView(
     }
 
     private fun supplyLevel(owner: Int, startX: Int, startY: Int): Float {
-        if (owner < 0) return 0.4f
+        if (owner < 0) return 0.35f
+        if (startX !in 0 until cols || startY !in 0 until rows) return 0.35f
+
         val start = map[startY][startX]
-        if (start.owner != owner) return 0.35f
-        if (start.city || start.port) return 1f
+        if (start.owner != owner) return 0.30f
 
         val seen = Array(rows) { BooleanArray(cols) }
         val q: ArrayDeque<Triple<Int, Int, Int>> = ArrayDeque()
         q.add(Triple(startX, startY, 0))
         seen[startY][startX] = true
 
+        var best = 0.34f
+
         while (q.isNotEmpty()) {
             val (x, y, d) = q.removeFirst()
-            if (d > 14) break
+            if (d > 18) continue
 
             val p = map[y][x]
-            if ((p.city || p.port) && p.owner == owner) {
-                return when {
-                    d <= 4 -> 1f
-                    d <= 8 -> 0.82f
-                    d <= 12 -> 0.62f
-                    else -> 0.45f
+            val localInfra = (0.55f + p.infrastructure * 0.10f).coerceAtMost(1f)
+
+            if (p.city || p.port) {
+                val distanceFactor = when {
+                    d <= 3 -> 1f
+                    d <= 6 -> 0.88f
+                    d <= 10 -> 0.72f
+                    d <= 14 -> 0.56f
+                    else -> 0.42f
                 }
+                best = max(best, distanceFactor * localInfra)
             }
 
             for ((nx, ny) in neighbors(x, y)) {
@@ -677,7 +708,7 @@ class GameView(
             }
         }
 
-        return 0.38f
+        return best.coerceIn(0.30f, 1f)
     }
 
     private fun aiTurn(owner: Int) {
@@ -1757,6 +1788,22 @@ class GameView(
 
         cursorX = x
         cursorY = y
+
+        val secondaryClick =
+            (event.buttonState and MotionEvent.BUTTON_SECONDARY) != 0 ||
+                event.actionButton == MotionEvent.BUTTON_SECONDARY
+
+        if (secondaryClick) {
+            val underCursor = divisions.filter { it.owner == 0 && it.x == x && it.y == y && it.selected }
+            if (underCursor.isNotEmpty()) {
+                underCursor.forEach { it.selected = false }
+                flash("Снято с выбора: ${underCursor.size} дивизий.")
+            } else {
+                clearSelection()
+                flash("Выделение снято.")
+            }
+            return true
+        }
 
         if (nukeTargetMode) {
             launchPlayerNuke(x, y)
