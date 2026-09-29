@@ -3211,19 +3211,19 @@ class VectorGameView(
                 clampPan()
             }
 
-            KeyEvent.KEYCODE_LEFT -> {
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
                 mapPanX += 35f
                 clampPan()
             }
-            KeyEvent.KEYCODE_RIGHT -> {
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
                 mapPanX -= 35f
                 clampPan()
             }
-            KeyEvent.KEYCODE_UP -> {
+            KeyEvent.KEYCODE_DPAD_UP -> {
                 mapPanY += 35f
                 clampPan()
             }
-            KeyEvent.KEYCODE_DOWN -> {
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
                 mapPanY -= 35f
                 clampPan()
             }
