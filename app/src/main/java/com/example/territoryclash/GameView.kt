@@ -216,15 +216,54 @@ class GameView(
     }
 
     private fun createStartingArmy(owner: Int, sx: Int, sy: Int) {
-        addDivision(owner, WarRules.INFANTRY, sx, sy)
-        addDivision(owner, WarRules.INFANTRY, (sx - 1).coerceAtLeast(1), sy)
-        addDivision(owner, WarRules.INFANTRY, sx, (sy + 1).coerceAtMost(rows - 2))
-        addDivision(owner, WarRules.ARMOR, (sx + 1).coerceAtMost(cols - 2), sy)
-        addDivision(owner, WarRules.AIR, sx, sy)
+        fun ownedNear(tx: Int, ty: Int): Pair<Int, Int> {
+            var best = sx to sy
+            var bestDistance = Int.MAX_VALUE
+            for (y in max(0, ty - 5)..min(rows - 1, ty + 5)) {
+                for (x in max(0, tx - 5)..min(cols - 1, tx + 5)) {
+                    if (map[y][x].owner != owner || map[y][x].terrain == WarRules.WATER) continue
+                    val d = abs(x - tx) + abs(y - ty)
+                    if (d < bestDistance) {
+                        bestDistance = d
+                        best = x to y
+                    }
+                }
+            }
+            return best
+        }
 
-        if (owner == 0) {
-            addDivision(owner, WarRules.ARMOR, sx, (sy - 1).coerceAtLeast(1))
-            addDivision(owner, WarRules.INFANTRY, (sx + 1).coerceAtMost(cols - 2), (sy + 1).coerceAtMost(rows - 2))
+        val provinceFactor = provinceCount(owner)
+        val infantryCount = when {
+            provinceFactor >= 120 -> 8
+            provinceFactor >= 70 -> 6
+            provinceFactor >= 35 -> 4
+            provinceFactor >= 12 -> 3
+            else -> 2
+        }
+
+        repeat(infantryCount) { i ->
+            val dx = (i % 3) - 1
+            val dy = (i / 3) - 1
+            val pos = ownedNear(sx + dx * 2, sy + dy * 2)
+            addDivision(owner, WarRules.INFANTRY, pos.first, pos.second)
+        }
+
+        if (provinceFactor >= 18) {
+            val armorPos = ownedNear(sx + 2, sy)
+            addDivision(owner, WarRules.ARMOR, armorPos.first, armorPos.second)
+        }
+
+        if (provinceFactor >= 28) {
+            val armorPos2 = ownedNear(sx - 2, sy + 1)
+            addDivision(owner, WarRules.ARMOR, armorPos2.first, armorPos2.second)
+        }
+
+        val airPos = ownedNear(sx, sy)
+        addDivision(owner, WarRules.AIR, airPos.first, airPos.second)
+
+        if (owner == 0 && provinceFactor >= 20) {
+            val extra = ownedNear(sx + 1, sy - 2)
+            addDivision(owner, WarRules.INFANTRY, extra.first, extra.second)
         }
     }
 
@@ -952,107 +991,92 @@ class GameView(
 
         text.textAlign = Paint.Align.CENTER
         text.color = Color.rgb(232, 235, 232)
-        text.textSize = 31f
+        text.textSize = 28f
         text.isFakeBoldText = true
-        canvas.drawText("ВЫБЕРИ СТРАНУ", width / 2f, 54f, text)
+        canvas.drawText("ВЫБЕРИ СТРАНУ — ЕВРОПА 1936", width / 2f, 42f, text)
         text.isFakeBoldText = false
 
-        text.textSize = 13.5f
-        text.color = Color.rgb(157, 169, 177)
-        canvas.drawText("Кампания начинается в 1936 году.  Нажми на карточку страны.", width / 2f, 79f, text)
+        text.textSize = 12.5f
+        text.color = Color.rgb(156, 168, 174)
+        canvas.drawText("Все страны сценария доступны для игры.", width / 2f, 64f, text)
 
-        val names = arrayOf("Германия", "Франция", "Польша", "Италия", "СССР", "Великобритания")
-        val tags = arrayOf("GER", "FRA", "POL", "ITA", "USSR", "UK")
-        val colors = intArrayOf(
-            Color.rgb(85, 100, 112),
-            Color.rgb(84, 108, 142),
-            Color.rgb(145, 118, 75),
-            Color.rgb(105, 126, 89),
-            Color.rgb(143, 80, 76),
-            Color.rgb(111, 101, 80)
-        )
+        val columns = 6
+        val rowsGrid = 5
+        val gap = 7f
+        val side = 12f
+        val top = 82f
+        val bottom = height - 34f
+        val cardW = (width - side * 2f - gap * (columns - 1)) / columns
+        val cardH = (bottom - top - gap * (rowsGrid - 1)) / rowsGrid
 
-        val columns = 3
-        val gap = 18f
-        val cardW = min(270f, (width - gap * 4f) / columns)
-        val cardH = min(150f, (height - 150f) / 2f - 14f)
-        val totalW = cardW * columns + gap * (columns - 1)
-        val startX = width / 2f - totalW / 2f
-        val startY = 108f
-
-        for (i in names.indices) {
+        for (i in 0 until EuropeScenario.COUNTRY_COUNT) {
             val col = i % columns
             val row = i / columns
-            val left = startX + col * (cardW + gap)
-            val top = startY + row * (cardH + gap)
+            val left = side + col * (cardW + gap)
+            val t = top + row * (cardH + gap)
 
             paint.style = Paint.Style.FILL
-            paint.color = Color.rgb(31, 38, 43)
-            canvas.drawRoundRect(left, top, left + cardW, top + cardH, 9f, 9f, paint)
+            paint.color = Color.rgb(31, 38, 42)
+            canvas.drawRoundRect(left, t, left + cardW, t + cardH, 6f, 6f, paint)
 
-            paint.color = colors[i]
-            canvas.drawRoundRect(left + 10f, top + 10f, left + 74f, top + 50f, 5f, 5f, paint)
+            paint.color = EuropeScenario.canonicalColor(i)
+            canvas.drawRoundRect(left + 5f, t + 5f, left + 39f, t + cardH - 5f, 4f, 4f, paint)
 
             text.textAlign = Paint.Align.CENTER
-            text.color = Color.WHITE
-            text.textSize = 15f
+            text.textSize = 10.5f
             text.isFakeBoldText = true
-            canvas.drawText(tags[i], left + 42f, top + 36f, text)
-
-            text.textAlign = Paint.Align.LEFT
-            text.textSize = 19f
-            text.color = Color.rgb(229, 233, 234)
-            canvas.drawText(names[i], left + 88f, top + 38f, text)
-            text.isFakeBoldText = false
-
-            text.textSize = 11.5f
-            text.color = Color.rgb(156, 169, 176)
+            text.color = Color.WHITE
             canvas.drawText(
-                when (i) {
-                    EuropeScenario.GERMANY -> "сильная промышленность и бронетехника"
-                    EuropeScenario.FRANCE -> "сильная оборона и укреплённый фронт"
-                    EuropeScenario.POLAND -> "сложная позиция между крупными державами"
-                    EuropeScenario.ITALY -> "горная война и Средиземноморье"
-                    EuropeScenario.USSR -> "большие резервы и длинный фронт"
-                    else -> "островная база, авиация и морские порты"
-                },
-                left + 16f,
-                top + 79f,
+                EuropeScenario.canonicalTag(i),
+                left + 22f,
+                t + cardH * 0.60f,
                 text
             )
 
-            paint.style = Paint.Style.FILL
-            paint.color = Color.rgb(61, 73, 79)
-            canvas.drawRoundRect(left + 16f, top + cardH - 43f, left + cardW - 16f, top + cardH - 12f, 5f, 5f, paint)
+            text.textAlign = Paint.Align.LEFT
+            text.textSize = 11.3f
+            text.isFakeBoldText = false
+            text.color = Color.rgb(225, 230, 231)
+            canvas.drawText(
+                EuropeScenario.canonicalName(i),
+                left + 45f,
+                t + cardH * 0.47f,
+                text
+            )
 
-            text.textAlign = Paint.Align.CENTER
-            text.textSize = 12.5f
-            text.color = Color.WHITE
-            canvas.drawText("НАЧАТЬ КАМПАНИЮ", left + cardW / 2f, top + cardH - 22f, text)
+            text.textSize = 9.2f
+            text.color = Color.rgb(137, 151, 158)
+            canvas.drawText(
+                "начать",
+                left + 45f,
+                t + cardH * 0.73f,
+                text
+            )
         }
 
         text.textAlign = Paint.Align.LEFT
-        text.textSize = 12f
-        text.color = Color.rgb(135, 147, 153)
-        canvas.drawText("Назад: системная кнопка Back / Esc", 14f, height - 16f, text)
+        text.textSize = 11f
+        text.color = Color.rgb(125, 137, 143)
+        canvas.drawText("Back / Esc — главное меню", 12f, height - 10f, text)
     }
 
     private fun handleCountrySelectTouch(x: Float, y: Float) {
-        val columns = 3
-        val gap = 18f
-        val cardW = min(270f, (width - gap * 4f) / columns)
-        val cardH = min(150f, (height - 150f) / 2f - 14f)
-        val totalW = cardW * columns + gap * (columns - 1)
-        val startX = width / 2f - totalW / 2f
-        val startY = 108f
+        val columns = 6
+        val rowsGrid = 5
+        val gap = 7f
+        val side = 12f
+        val top = 82f
+        val bottom = height - 34f
+        val cardW = (width - side * 2f - gap * (columns - 1)) / columns
+        val cardH = (bottom - top - gap * (rowsGrid - 1)) / rowsGrid
 
-        for (i in 0 until 6) {
+        for (i in 0 until EuropeScenario.COUNTRY_COUNT) {
             val col = i % columns
             val row = i / columns
-            val left = startX + col * (cardW + gap)
-            val top = startY + row * (cardH + gap)
+            val left = side + col * (cardW + gap)
+            val t = top + row * (cardH + gap)
 
-            if (x in left..(left + cardW) && y in top..(top + cardH)) {
+            if (x in left..(left + cardW) && y in t..(t + cardH)) {
                 startCountry(i)
                 return
             }
