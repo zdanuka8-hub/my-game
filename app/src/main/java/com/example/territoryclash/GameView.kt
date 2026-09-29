@@ -21,24 +21,17 @@ class GameView(
 
     private val cols = EuropeScenario.COLS
     private val rows = EuropeScenario.ROWS
-    private val nations = 6
+    private val nations = EuropeScenario.COUNTRY_COUNT
 
     private val map = Array(rows) { Array(cols) { Province() } }
     private val nation = Array(nations) { NationState() }
     private val divisions = mutableListOf<Division>()
     private val battles = mutableListOf<Battle>()
 
-    private val nationColors = intArrayOf(
-        Color.rgb(77, 104, 132),
-        Color.rgb(144, 82, 76),
-        Color.rgb(151, 124, 78),
-        Color.rgb(103, 91, 139),
-        Color.rgb(80, 119, 90),
-        Color.rgb(116, 105, 78)
-    )
+    private var nationColors = IntArray(nations) { Color.rgb(120, 120, 120) }
 
-    private var nationNames = arrayOf("Германия", "Франция", "Польша", "Италия", "СССР", "Великобритания")
-    private var nationTags = arrayOf("GER", "FRA", "POL", "ITA", "USSR", "UK")
+    private var nationNames = Array(nations) { "Страна ${it + 1}" }
+    private var nationTags = Array(nations) { "N${it + 1}" }
 
     private var screen = SCREEN_MAIN_MENU
     private var selectedCountry = EuropeScenario.GERMANY
@@ -107,6 +100,7 @@ class GameView(
         val setup = EuropeScenario.build(map, selectedCountry)
         nationNames = setup.names
         nationTags = setup.tags
+        nationColors = setup.colors
         val starts = setup.starts
 
         starts.forEachIndexed { owner, (sx, sy) ->
@@ -781,6 +775,7 @@ class GameView(
 
         drawTopBar(canvas)
         drawMap(canvas, top, mapBottom, cw, ch)
+        drawProvinceBorders(canvas, top, cw, ch)
         drawCountryLabels(canvas, top, cw, ch)
         drawFrontLines(canvas, top, cw, ch)
         drawBattles(canvas, top, cw, ch)
@@ -998,7 +993,7 @@ class GameView(
     }
 
     private fun startCountry(country: Int) {
-        selectedCountry = country.coerceIn(0, 5)
+        selectedCountry = country.coerceIn(0, EuropeScenario.COUNTRY_COUNT - 1)
         reset()
         screen = SCREEN_GAME
         speedIndex = 1
@@ -1089,11 +1084,6 @@ class GameView(
                 canvas.drawRect(left, t, left + cw + 0.5f, t + ch + 0.5f, paint)
 
                 drawTerrainTexture(canvas, p, left, t, cw, ch)
-
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 0.75f
-                paint.color = Color.argb(80, 15, 18, 20)
-                canvas.drawRect(left, t, left + cw, t + ch, paint)
 
                 drawProvinceStructures(canvas, p, left, t, cw, ch)
             }
@@ -1207,6 +1197,58 @@ class GameView(
             path.lineTo(iconX, iconY + 9f)
             path.close()
             canvas.drawPath(path, paint)
+        }
+    }
+
+
+    private fun drawProvinceBorders(canvas: Canvas, top: Float, cw: Float, ch: Float) {
+        paint.style = Paint.Style.STROKE
+
+        for (y in 0 until rows) {
+            for (x in 0 until cols) {
+                val p = map[y][x]
+                if (p.terrain == WarRules.WATER) continue
+
+                val left = x * cw
+                val cellTop = top + y * ch
+
+                fun edge(
+                    nx: Int,
+                    ny: Int,
+                    x1: Float,
+                    y1: Float,
+                    x2: Float,
+                    y2: Float
+                ) {
+                    if (nx !in 0 until cols || ny !in 0 until rows) {
+                        paint.strokeWidth = 1.5f
+                        paint.color = Color.argb(150, 18, 22, 24)
+                        canvas.drawLine(x1, y1, x2, y2, paint)
+                        return
+                    }
+
+                    val n = map[ny][nx]
+                    if (n.terrain == WarRules.WATER) {
+                        paint.strokeWidth = 1.35f
+                        paint.color = Color.argb(155, 18, 24, 28)
+                        canvas.drawLine(x1, y1, x2, y2, paint)
+                        return
+                    }
+
+                    if (n.owner != p.owner) {
+                        paint.strokeWidth = 2.2f
+                        paint.color = Color.argb(210, 28, 31, 32)
+                        canvas.drawLine(x1, y1, x2, y2, paint)
+                    } else if (n.regionId != p.regionId) {
+                        paint.strokeWidth = 0.65f
+                        paint.color = Color.argb(105, 25, 28, 30)
+                        canvas.drawLine(x1, y1, x2, y2, paint)
+                    }
+                }
+
+                edge(x + 1, y, left + cw, cellTop, left + cw, cellTop + ch)
+                edge(x, y + 1, left, cellTop + ch, left + cw, cellTop + ch)
+            }
         }
     }
 
