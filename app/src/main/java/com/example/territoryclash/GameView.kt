@@ -4,13 +4,14 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import java.util.ArrayDeque
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sin
 import kotlin.random.Random
 
 class GameView(
@@ -18,80 +19,45 @@ class GameView(
     private val music: BackgroundMusic
 ) : View(context) {
 
-    data class Cell(
-        var terrain: Int = LAND,
-        var owner: Int = NEUTRAL,
-        var strength: Float = 3f,
-        var structure: Int = STRUCT_NONE,
-        var pulse: Float = 0f
-    )
+    private val cols = 30
+    private val rows = 17
+    private val nations = 5
 
-    data class FactionState(
-        var balance: Float = 330f,
-        var money: Float = 240f,
-        var nukes: Int = 0
-    )
+    private val map = Array(rows) { Array(cols) { Province() } }
+    private val nation = Array(nations) { NationState() }
+    private val divisions = mutableListOf<Division>()
+    private val battles = mutableListOf<Battle>()
 
-    companion object {
-        const val LAND = 0
-        const val WATER = 1
-        const val NEUTRAL = -1
-        const val WATER_OWNER = -2
-
-        const val STRUCT_NONE = 0
-        const val STRUCT_CITY = 1
-        const val STRUCT_FACTORY = 2
-        const val STRUCT_PORT = 3
-        const val STRUCT_FORT = 4
-        const val STRUCT_SILO = 5
-
-        const val COST_CITY = 140
-        const val COST_FACTORY = 180
-        const val COST_PORT = 160
-        const val COST_FORT = 120
-        const val COST_SILO = 300
-        const val COST_NUKE = 420
-    }
-
-    private val cols = 38
-    private val rows = 22
-    private val factions = 6
-
-    private val cells = Array(rows) { Array(cols) { Cell() } }
-    private val states = Array(factions) { FactionState() }
-
-    private val colors = intArrayOf(
-        Color.rgb(52, 151, 255),
-        Color.rgb(237, 77, 91),
-        Color.rgb(255, 169, 64),
-        Color.rgb(174, 91, 235),
-        Color.rgb(71, 205, 129),
-        Color.rgb(236, 102, 196)
+    private val nationColors = intArrayOf(
+        Color.rgb(76, 112, 154),
+        Color.rgb(154, 77, 72),
+        Color.rgb(148, 119, 71),
+        Color.rgb(106, 91, 145),
+        Color.rgb(75, 125, 92)
     )
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textAlign = Paint.Align.CENTER
-    }
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    private var selectedX = -1
-    private var selectedY = -1
+    private var nextDivisionId = 1
+    private var selectedProvinceX = -1
+    private var selectedProvinceY = -1
     private var cursorX = 4
     private var cursorY = rows / 2
-    private var attackPercent = 0.35f
 
-    private var dragging = false
-    private var lastDragX = -1
-    private var lastDragY = -1
-
-    private var last = System.nanoTime()
-    private var botClock = 0f
+    private var lastFrame = System.nanoTime()
     private var economyClock = 0f
-    private var gameOver: String? = null
+    private var aiClock = 0f
+    private var dayClock = 0f
+    private var day = 1
+
+    private val speeds = floatArrayOf(0f, 1f, 2f, 4f)
+    private var speedIndex = 1
+
+    private var status = "Выбери дивизии, затем провинцию для движения или атаки."
+    private var statusTimer = 6f
     private var nukeTargetMode = false
-    private var status = "Расширяй страну, копи армию, строй экономику"
-    private var statusTimer = 5f
+    private var gameOver: String? = null
 
     init {
         isFocusable = true
@@ -100,10 +66,27 @@ class GameView(
     }
 
     private fun reset() {
-        for (id in 0 until factions) {
-            states[id].balance = 330f
-            states[id].money = 240f
-            states[id].nukes = 0
+        divisions.clear()
+        battles.clear()
+        nextDivisionId = 1
+        day = 1
+        dayClock = 0f
+        economyClock = 0f
+        aiClock = 0f
+        speedIndex = 1
+        nukeTargetMode = false
+        gameOver = null
+
+        for (i in 0 until nations) {
+            nation[i] = NationState(
+                manpower = if (i == 0) 95f else 88f,
+                equipment = 1500f,
+                tanks = 260f,
+                aircraft = 170f,
+                fuel = 1050f,
+                money = 620f,
+                nukes = 0
+            )
         }
 
         generateMap()
@@ -113,983 +96,1698 @@ class GameView(
             cols - 5 to rows / 2,
             cols / 2 to 3,
             cols / 2 to rows - 4,
-            10 to 4,
-            cols - 11 to rows - 5
+            cols / 2 to rows / 2
         )
 
-        starts.forEachIndexed { id, (sx, sy) ->
-            carveStart(id, sx, sy)
+        starts.forEachIndexed { owner, (sx, sy) ->
+            createCountry(owner, sx, sy)
+            createStartingArmy(owner, sx, sy)
         }
 
-        selectedX = -1
-        selectedY = -1
-        cursorX = 4
-        cursorY = rows / 2
-        attackPercent = 0.35f
-        dragging = false
-        nukeTargetMode = false
-        gameOver = null
-        status = "Зажми и веди пальцем по соседним клеткам — территория будет захватываться цепочкой."
-        statusTimer = 7f
-        botClock = 0f
-        economyClock = 0f
-        last = System.nanoTime()
+        clearSelection()
+        selectedProvinceX = starts[0].first
+        selectedProvinceY = starts[0].second
+        cursorX = selectedProvinceX
+        cursorY = selectedProvinceY
+
+        status = "HoI-lite 0.4: пехота, танки, авиация, снабжение и бои за контроль провинций."
+        statusTimer = 8f
+        lastFrame = System.nanoTime()
         invalidate()
     }
 
     private fun generateMap() {
-        for (y in 0 until rows) for (x in 0 until cols) {
-            val nx = x.toFloat() / cols
-            val ny = y.toFloat() / rows
-            val coast =
-                sin(nx * 13.0).toFloat() * 0.12f +
-                sin(ny * 17.0).toFloat() * 0.10f +
-                sin((nx + ny) * 19.0).toFloat() * 0.07f
+        val rng = Random(404)
+        for (y in 0 until rows) {
+            for (x in 0 until cols) {
+                val p = map[y][x]
 
-            val lakeA = ((x - 13) * (x - 13) + (y - 6) * (y - 6)) < 12
-            val lakeB = ((x - 25) * (x - 25) + (y - 15) * (y - 15)) < 15
-            val channel = x in 18..19 && y in 6..15
-            val edgeSea = y == 0 || y == rows - 1 || x == 0 || x == cols - 1
-            val noiseSea = coast > 0.21f && (x + y) % 3 != 0
+                val sea =
+                    x == 0 || y == 0 || x == cols - 1 || y == rows - 1 ||
+                    ((x - 10) * (x - 10) + (y - 5) * (y - 5) < 8) ||
+                    ((x - 21) * (x - 21) + (y - 12) * (y - 12) < 10) ||
+                    (x in 14..15 && y in 6..10)
 
-            val c = cells[y][x]
-            if (lakeA || lakeB || channel || edgeSea || noiseSea) {
-                c.terrain = WATER
-                c.owner = WATER_OWNER
-                c.strength = 0f
-                c.structure = STRUCT_NONE
-            } else {
-                c.terrain = LAND
-                c.owner = NEUTRAL
-                c.strength = 2.5f + Random.nextFloat() * 7f
-                c.structure = STRUCT_NONE
+                if (sea) {
+                    p.terrain = WarRules.WATER
+                    p.owner = WarRules.WATER_OWNER
+                    p.garrison = 0f
+                    p.fort = 0
+                    p.city = false
+                    p.port = false
+                    p.silo = false
+                    continue
+                }
+
+                val roll = rng.nextFloat()
+                p.terrain = when {
+                    roll < 0.19f -> WarRules.FOREST
+                    roll < 0.32f -> WarRules.HILLS
+                    else -> WarRules.PLAINS
+                }
+                p.owner = WarRules.NEUTRAL
+                p.garrison = 6f + rng.nextFloat() * 6f
+                p.fort = 0
+                p.city = false
+                p.port = false
+                p.silo = false
             }
-            c.pulse = 0f
         }
     }
 
-    private fun carveStart(id: Int, sx: Int, sy: Int) {
-        for (dy in -2..2) for (dx in -2..2) {
-            if (abs(dx) + abs(dy) > 3) continue
-            val x = (sx + dx).coerceIn(1, cols - 2)
-            val y = (sy + dy).coerceIn(1, rows - 2)
-            val c = cells[y][x]
-            c.terrain = LAND
-            c.owner = id
-            c.strength = if (dx == 0 && dy == 0) 18f else 7f
-            c.structure = if (dx == 0 && dy == 0) STRUCT_CITY else STRUCT_NONE
+    private fun createCountry(owner: Int, sx: Int, sy: Int) {
+        for (dy in -2..2) {
+            for (dx in -3..3) {
+                if (abs(dx) + abs(dy) > 4) continue
+                val x = (sx + dx).coerceIn(1, cols - 2)
+                val y = (sy + dy).coerceIn(1, rows - 2)
+                val p = map[y][x]
+                p.terrain = if (p.terrain == WarRules.WATER) WarRules.PLAINS else p.terrain
+                p.owner = owner
+                p.garrison = 5f
+            }
         }
+
+        val capital = map[sy][sx]
+        capital.city = true
+        capital.garrison = 16f
+
+        val coast = findNearestCoast(owner, sx, sy)
+        if (coast != null) {
+            map[coast.second][coast.first].port = true
+        }
+    }
+
+    private fun createStartingArmy(owner: Int, sx: Int, sy: Int) {
+        addDivision(owner, WarRules.INFANTRY, sx, sy)
+        addDivision(owner, WarRules.INFANTRY, (sx - 1).coerceAtLeast(1), sy)
+        addDivision(owner, WarRules.INFANTRY, sx, (sy + 1).coerceAtMost(rows - 2))
+        addDivision(owner, WarRules.ARMOR, (sx + 1).coerceAtMost(cols - 2), sy)
+        addDivision(owner, WarRules.AIR, sx, sy)
+
+        if (owner == 0) {
+            addDivision(owner, WarRules.ARMOR, sx, (sy - 1).coerceAtLeast(1))
+            addDivision(owner, WarRules.INFANTRY, (sx + 1).coerceAtMost(cols - 2), (sy + 1).coerceAtMost(rows - 2))
+        }
+    }
+
+    private fun addDivision(owner: Int, type: Int, x: Int, y: Int) {
+        divisions += Division(
+            id = nextDivisionId++,
+            owner = owner,
+            type = type,
+            x = x,
+            y = y,
+            strength = 100f,
+            org = 100f
+        )
     }
 
     override fun onDraw(canvas: Canvas) {
         val now = System.nanoTime()
-        val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
-        last = now
+        val rawDt = ((now - lastFrame) / 1_000_000_000f).coerceIn(0f, 0.05f)
+        lastFrame = now
 
-        update(dt)
-        drawWorld(canvas)
+        val dt = rawDt * speeds[speedIndex]
+        if (statusTimer > 0f) statusTimer -= rawDt
+
+        if (dt > 0f && gameOver == null) {
+            updateGame(dt)
+        }
+
+        drawGame(canvas)
         postInvalidateOnAnimation()
     }
 
-    private fun update(dt: Float) {
-        if (statusTimer > 0f) statusTimer -= dt
-        for (row in cells) for (c in row) c.pulse = max(0f, c.pulse - dt * 2.8f)
-
-        if (gameOver != null) return
+    private fun updateGame(dt: Float) {
+        dayClock += dt
+        if (dayClock >= 2.2f) {
+            val passed = (dayClock / 2.2f).toInt()
+            day += passed
+            dayClock -= passed * 2.2f
+        }
 
         economyClock += dt
-        if (economyClock >= 0.20f) {
+        if (economyClock >= 0.5f) {
             val step = economyClock
             economyClock = 0f
+            updateEconomy(step)
+        }
 
-            for (id in 0 until factions) {
-                if (land(id) <= 0) continue
+        updateDivisions(dt)
+        updateBattles(dt)
 
-                val cities = countStructure(id, STRUCT_CITY)
-                val factories = countStructure(id, STRUCT_FACTORY)
-                val ports = countStructure(id, STRUCT_PORT)
+        aiClock += dt
+        if (aiClock >= 0.8f) {
+            aiClock = 0f
+            for (owner in 1 until nations) aiTurn(owner)
+        }
 
-                val balanceGrowth =
-                    2.8f +
-                    land(id) * 0.075f +
-                    cities * 1.35f +
-                    factories * 2.75f
+        checkVictory()
+    }
 
-                val moneyGrowth =
-                    1.7f +
-                    land(id) * 0.035f +
-                    cities * 1.25f +
-                    ports * 0.65f
+    private fun updateEconomy(dt: Float) {
+        for (owner in 0 until nations) {
+            if (provinceCount(owner) == 0) continue
 
-                states[id].balance = min(balanceCap(id), states[id].balance + balanceGrowth * step)
-                states[id].money += moneyGrowth * step
+            val cities = countCities(owner)
+            val ports = countPorts(owner)
+
+            val s = nation[owner]
+            s.money += dt * (4.0f + cities * 5.0f + provinceCount(owner) * 0.22f)
+            s.manpower = min(130f, s.manpower + dt * (0.025f + cities * 0.055f))
+            s.equipment += dt * (2.0f + cities * 1.8f)
+            s.tanks += dt * (0.20f + cities * 0.22f)
+            s.aircraft += dt * (0.15f + cities * 0.18f)
+            s.fuel += dt * (1.2f + ports * 1.1f + provinceCount(owner) * 0.035f)
+        }
+    }
+
+    private fun updateDivisions(dt: Float) {
+        val activeIds = mutableSetOf<Int>()
+        for (b in battles) activeIds += b.attackers
+        for (b in battles) {
+            for (d in landDivisionsAt(b.targetX, b.targetY)) activeIds += d.id
+        }
+
+        for (d in divisions.toList()) {
+            if (d.strength <= 2f) {
+                divisions.remove(d)
+                continue
             }
 
-            for (y in 0 until rows) for (x in 0 until cols) {
-                val c = cells[y][x]
-                if (c.owner < 0 || c.terrain != LAND) continue
-                val regen = when (c.structure) {
-                    STRUCT_FORT -> 0.75f
-                    STRUCT_CITY -> 0.32f
-                    STRUCT_SILO -> 0.16f
-                    else -> 0.09f
+            if (d.type == WarRules.AIR) {
+                d.org = min(100f, d.org + dt * 2.4f)
+                continue
+            }
+
+            val supply = supplyLevel(d.owner, d.x, d.y)
+            val fighting = d.id in activeIds
+
+            if (!fighting) {
+                d.org = min(100f, d.org + dt * (3.5f * supply))
+                d.entrenchment = min(1f, d.entrenchment + dt * 0.045f * supply)
+                reinforceDivision(d, dt, supply)
+            } else {
+                d.entrenchment = max(0f, d.entrenchment - dt * 0.12f)
+            }
+
+            if (d.order.isNotEmpty() && !fighting) {
+                d.moveTimer -= dt
+                if (d.moveTimer <= 0f) {
+                    val next = d.order.removeAt(0)
+                    if (map[next.second][next.first].owner == d.owner &&
+                        map[next.second][next.first].terrain != WarRules.WATER
+                    ) {
+                        d.x = next.first
+                        d.y = next.second
+                        d.org = max(5f, d.org - if (d.type == WarRules.ARMOR) 1.5f else 0.9f)
+                        d.entrenchment = 0f
+                    } else {
+                        d.order.clear()
+                    }
+
+                    d.moveTimer = if (d.type == WarRules.ARMOR) 0.36f else 0.55f
+
+                    if (d.order.isEmpty() && d.attackX >= 0 && d.attackY >= 0) {
+                        if (adjacent(d.x, d.y, d.attackX, d.attackY)) {
+                            joinBattle(d.owner, d.attackX, d.attackY, d.id)
+                        }
+                    }
                 }
-                c.strength = min(55f, c.strength + regen * step)
+            }
+        }
+    }
+
+    private fun reinforceDivision(d: Division, dt: Float, supply: Float) {
+        if (d.strength >= 100f || supply < 0.45f) return
+        val state = nation[d.owner]
+
+        when (d.type) {
+            WarRules.INFANTRY -> {
+                if (state.equipment < 0.2f || state.manpower < 0.01f) return
+                val amount = min(100f - d.strength, dt * 0.75f * supply)
+                d.strength += amount
+                state.equipment = max(0f, state.equipment - amount * 0.10f)
+                state.manpower = max(0f, state.manpower - amount * 0.004f)
+            }
+
+            WarRules.ARMOR -> {
+                if (state.tanks < 0.05f || state.equipment < 0.1f) return
+                val amount = min(100f - d.strength, dt * 0.52f * supply)
+                d.strength += amount
+                state.tanks = max(0f, state.tanks - amount * 0.055f)
+                state.equipment = max(0f, state.equipment - amount * 0.05f)
+                state.manpower = max(0f, state.manpower - amount * 0.0025f)
+            }
+        }
+    }
+
+    private fun updateBattles(dt: Float) {
+        val iterator = battles.iterator()
+        while (iterator.hasNext()) {
+            val battle = iterator.next()
+            battle.age += dt
+
+            battle.attackers.removeAll { id ->
+                val d = divisionById(id)
+                d == null ||
+                    d.owner != battle.attackerOwner ||
+                    d.type == WarRules.AIR ||
+                    d.strength <= 4f ||
+                    d.org <= 2f ||
+                    !adjacent(d.x, d.y, battle.targetX, battle.targetY)
+            }
+
+            if (battle.attackers.isEmpty()) {
+                iterator.remove()
+                continue
+            }
+
+            val target = map[battle.targetY][battle.targetX]
+            if (target.owner == battle.attackerOwner) {
+                iterator.remove()
+                continue
+            }
+
+            val defenderOwner = target.owner
+            val defenders = landDivisionsAt(battle.targetX, battle.targetY)
+                .filter { it.owner == defenderOwner }
+
+            val attackerPower = battle.attackers.sumOf { id ->
+                divisionById(id)?.let {
+                    combatPower(it, attacking = true, target.terrain)
+                }?.toDouble() ?: 0.0
+            }.toFloat() * airSupportMultiplier(battle.attackerOwner, battle.targetX, battle.targetY)
+
+            val defenderPowerUnits = defenders.sumOf {
+                combatPower(it, attacking = false, target.terrain).toDouble()
+            }.toFloat()
+
+            val provinceDefense =
+                target.garrison *
+                    terrainDefense(target.terrain) *
+                    (1f + target.fort * 0.28f)
+
+            val defenderAir = if (defenderOwner >= 0) {
+                airSupportMultiplier(defenderOwner, battle.targetX, battle.targetY)
+            } else {
+                1f
+            }
+
+            val defenderPower = (defenderPowerUnits + provinceDefense) * defenderAir
+
+            applyCombatLosses(
+                battle = battle,
+                defenders = defenders,
+                attackerPower = attackerPower,
+                defenderPower = defenderPower,
+                dt = dt
+            )
+
+            if (defenders.isEmpty()) {
+                target.garrison = max(0f, target.garrison - dt * attackerPower * 0.055f)
+            }
+
+            val ratio = attackerPower / max(8f, defenderPower)
+            val push =
+                when {
+                    ratio >= 2.0f -> 21f
+                    ratio >= 1.45f -> 14f
+                    ratio >= 1.10f -> 8f
+                    ratio >= 0.82f -> 2f
+                    else -> -5f
+                }
+
+            battle.progress = (battle.progress + dt * push).coerceIn(-35f, 100f)
+
+            val attackersBroken = battle.attackers.all { id ->
+                val d = divisionById(id)
+                d == null || d.org < 8f || d.strength < 12f
+            }
+
+            if (attackersBroken || battle.progress <= -35f) {
+                for (id in battle.attackers) {
+                    divisionById(id)?.let {
+                        it.attackX = -1
+                        it.attackY = -1
+                        it.org = max(6f, it.org)
+                    }
+                }
+                iterator.remove()
+                continue
+            }
+
+            if (battle.progress >= 100f ||
+                (defenders.isEmpty() && target.garrison <= 0.2f && battle.age > 0.8f)
+            ) {
+                val oldOwner = target.owner
+                target.owner = battle.attackerOwner
+                target.garrison = 5f
+                target.fort = max(0, target.fort - 1)
+
+                for (id in battle.attackers) {
+                    divisionById(id)?.let { d ->
+                        d.x = battle.targetX
+                        d.y = battle.targetY
+                        d.org = max(12f, d.org - 8f)
+                        d.attackX = -1
+                        d.attackY = -1
+                        d.order.clear()
+                        d.entrenchment = 0f
+                    }
+                }
+
+                if (oldOwner >= 0) {
+                    nation[oldOwner].manpower = max(0f, nation[oldOwner].manpower - 0.25f)
+                }
+
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun applyCombatLosses(
+        battle: Battle,
+        defenders: List<Division>,
+        attackerPower: Float,
+        defenderPower: Float,
+        dt: Float
+    ) {
+        val aCount = max(1, battle.attackers.size)
+        val dCount = max(1, defenders.size)
+
+        for (id in battle.attackers) {
+            val d = divisionById(id) ?: continue
+            val supply = supplyLevel(d.owner, d.x, d.y)
+            val orgLoss = dt * (1.5f + defenderPower / (aCount * 32f))
+            val strengthLoss = dt * defenderPower / (aCount * 250f)
+
+            d.org = max(0f, d.org - orgLoss / max(0.45f, supply))
+            d.strength = max(0f, d.strength - strengthLoss)
+
+            if (d.type == WarRules.ARMOR) {
+                nation[d.owner].fuel = max(0f, nation[d.owner].fuel - dt * 1.4f)
             }
         }
 
-        botClock += dt
-        if (botClock >= 0.42f) {
-            botClock = 0f
-            for (id in 1 until factions) botTurn(id)
-            checkEnd()
+        for (d in defenders) {
+            val supply = supplyLevel(d.owner, d.x, d.y)
+            val entrenchBonus = 1f + d.entrenchment * 0.35f
+            val orgLoss = dt * (1.7f + attackerPower / (dCount * 30f))
+            val strengthLoss = dt * attackerPower / (dCount * 225f)
+
+            d.org = max(0f, d.org - orgLoss / (max(0.4f, supply) * entrenchBonus))
+            d.strength = max(0f, d.strength - strengthLoss / entrenchBonus)
+
+            if (d.type == WarRules.ARMOR) {
+                nation[d.owner].fuel = max(0f, nation[d.owner].fuel - dt * 1.0f)
+            }
+
+            if (d.org <= 3f && d.strength > 10f) {
+                retreatDivision(d)
+            }
+        }
+
+        divisions.removeAll { it.strength <= 2f }
+    }
+
+    private fun retreatDivision(d: Division) {
+        val candidates = neighbors(d.x, d.y).filter {
+            map[it.second][it.first].owner == d.owner &&
+                map[it.second][it.first].terrain != WarRules.WATER
+        }
+
+        if (candidates.isNotEmpty()) {
+            val dest = candidates.maxByOrNull {
+                supplyLevel(d.owner, it.first, it.second)
+            }!!
+            d.x = dest.first
+            d.y = dest.second
+            d.org = 12f
+            d.entrenchment = 0f
+        } else {
+            d.strength = 0f
         }
     }
 
-    private fun balanceCap(id: Int): Float {
-        return 260f +
-            land(id) * 19f +
-            countStructure(id, STRUCT_CITY) * 85f +
-            countStructure(id, STRUCT_FACTORY) * 55f
+    private fun combatPower(d: Division, attacking: Boolean, terrain: Int): Float {
+        val supply = supplyLevel(d.owner, d.x, d.y)
+        val state = nation[d.owner]
+
+        val base = when (d.type) {
+            WarRules.INFANTRY -> if (attacking) 17f else 20f
+            WarRules.ARMOR -> if (attacking) 31f else 24f
+            else -> 0f
+        }
+
+        val terrainMod = when (d.type) {
+            WarRules.INFANTRY -> when (terrain) {
+                WarRules.FOREST -> if (attacking) 0.93f else 1.13f
+                WarRules.HILLS -> if (attacking) 0.90f else 1.16f
+                else -> 1f
+            }
+
+            WarRules.ARMOR -> when (terrain) {
+                WarRules.FOREST -> 0.68f
+                WarRules.HILLS -> 0.62f
+                else -> 1.22f
+            }
+
+            else -> 1f
+        }
+
+        val fuelMod = if (d.type == WarRules.ARMOR && state.fuel < 80f) 0.58f else 1f
+        val entrench = if (!attacking) 1f + d.entrenchment * 0.30f else 1f
+
+        return base *
+            (d.strength / 100f).coerceAtLeast(0.12f) *
+            (d.org / 100f).coerceAtLeast(0.10f) *
+            supply.coerceIn(0.35f, 1f) *
+            terrainMod *
+            fuelMod *
+            entrench
     }
 
-    private fun botTurn(id: Int) {
-        if (land(id) <= 0) return
+    private fun airSupportMultiplier(owner: Int, x: Int, y: Int): Float {
+        if (owner < 0) return 1f
+        var support = 0f
+        for (d in divisions) {
+            if (d.owner != owner || d.type != WarRules.AIR) continue
+            if (d.missionX < 0 || d.missionY < 0) continue
+            if (abs(d.missionX - x) + abs(d.missionY - y) > 2) continue
 
-        botBuild(id)
+            val range = abs(d.x - d.missionX) + abs(d.y - d.missionY)
+            if (range > 7) continue
+            if (nation[owner].fuel <= 1f) continue
 
-        if (states[id].nukes > 0 && Random.nextFloat() < 0.055f) {
-            strongestEnemyTarget(id)?.let {
-                launchNuke(id, it.first, it.second)
+            support += (d.strength / 100f) * (d.org / 100f) * 0.16f
+            nation[owner].fuel = max(0f, nation[owner].fuel - 0.035f)
+        }
+        return 1f + min(0.34f, support)
+    }
+
+    private fun terrainDefense(terrain: Int): Float = when (terrain) {
+        WarRules.FOREST -> 1.24f
+        WarRules.HILLS -> 1.32f
+        else -> 1f
+    }
+
+    private fun supplyLevel(owner: Int, startX: Int, startY: Int): Float {
+        if (owner < 0) return 0.4f
+        val start = map[startY][startX]
+        if (start.owner != owner) return 0.35f
+        if (start.city || start.port) return 1f
+
+        val seen = Array(rows) { BooleanArray(cols) }
+        val q: ArrayDeque<Triple<Int, Int, Int>> = ArrayDeque()
+        q.add(Triple(startX, startY, 0))
+        seen[startY][startX] = true
+
+        while (q.isNotEmpty()) {
+            val (x, y, d) = q.removeFirst()
+            if (d > 14) break
+
+            val p = map[y][x]
+            if ((p.city || p.port) && p.owner == owner) {
+                return when {
+                    d <= 4 -> 1f
+                    d <= 8 -> 0.82f
+                    d <= 12 -> 0.62f
+                    else -> 0.45f
+                }
+            }
+
+            for ((nx, ny) in neighbors(x, y)) {
+                if (seen[ny][nx]) continue
+                val np = map[ny][nx]
+                if (np.owner != owner || np.terrain == WarRules.WATER) continue
+                seen[ny][nx] = true
+                q.add(Triple(nx, ny, d + 1))
+            }
+        }
+
+        return 0.38f
+    }
+
+    private fun aiTurn(owner: Int) {
+        if (provinceCount(owner) == 0) return
+
+        aiProduction(owner)
+
+        val air = divisions.filter { it.owner == owner && it.type == WarRules.AIR }
+        val ownBattle = battles.firstOrNull { it.attackerOwner == owner || map[it.targetY][it.targetX].owner == owner }
+        if (ownBattle != null) {
+            for (wing in air) {
+                wing.missionX = ownBattle.targetX
+                wing.missionY = ownBattle.targetY
+            }
+        }
+
+        val candidates = divisions.filter {
+            it.owner == owner &&
+                it.type != WarRules.AIR &&
+                it.order.isEmpty() &&
+                it.attackX < 0 &&
+                it.org > 42f &&
+                it.strength > 45f &&
+                battles.none { b -> it.id in b.attackers }
+        }
+
+        val d = candidates.randomOrNull() ?: return
+
+        val enemyAdjacent = neighbors(d.x, d.y)
+            .filter {
+                val p = map[it.second][it.first]
+                p.terrain != WarRules.WATER && p.owner != owner
+            }
+            .minByOrNull {
+                localDefenseScore(it.first, it.second)
+            }
+
+        if (enemyAdjacent != null) {
+            d.attackX = enemyAdjacent.first
+            d.attackY = enemyAdjacent.second
+            joinBattle(owner, enemyAdjacent.first, enemyAdjacent.second, d.id)
+            return
+        }
+
+        val friendlySteps = neighbors(d.x, d.y)
+            .filter {
+                map[it.second][it.first].owner == owner &&
+                    map[it.second][it.first].terrain != WarRules.WATER
+            }
+
+        val next = friendlySteps.minByOrNull {
+            distanceToNearestEnemy(owner, it.first, it.second)
+        }
+
+        if (next != null && distanceToNearestEnemy(owner, next.first, next.second) <
+            distanceToNearestEnemy(owner, d.x, d.y)
+        ) {
+            d.order.clear()
+            d.order += next
+            d.moveTimer = if (d.type == WarRules.ARMOR) 0.25f else 0.42f
+        }
+    }
+
+    private fun aiProduction(owner: Int) {
+        val state = nation[owner]
+        val cities = ownedProvinces(owner).filter { map[it.second][it.first].city }
+        if (cities.isEmpty()) return
+        val spawn = cities.random()
+
+        val landCount = divisions.count { it.owner == owner && it.type != WarRules.AIR }
+        if (landCount < max(5, provinceCount(owner) / 6) && Random.nextFloat() < 0.22f) {
+            if (state.manpower >= 6f && state.equipment >= 120f) {
+                trainDivision(owner, WarRules.INFANTRY, spawn.first, spawn.second, ai = true)
                 return
             }
         }
 
-        if (states[id].balance < 28f) return
-
-        val sources = mutableListOf<Pair<Int, Int>>()
-        for (y in 0 until rows) for (x in 0 until cols) {
-            val c = cells[y][x]
-            if (c.owner != id) continue
-
-            val border = neighbors(x, y).any {
-                val t = cells[it.second][it.first]
-                t.terrain == LAND && t.owner != id
-            }
-
-            val naval = c.structure == STRUCT_PORT && coastalTargetsFrom(x, y, id).isNotEmpty()
-            if (border || naval) sources += x to y
-        }
-
-        if (sources.isEmpty()) return
-
-        val source = sources.random()
-        val sx = source.first
-        val sy = source.second
-
-        val normalTargets = neighbors(sx, sy)
-            .filter {
-                val t = cells[it.second][it.first]
-                t.terrain == LAND && t.owner != id
-            }
-            .sortedBy {
-                val t = cells[it.second][it.first]
-                effectiveDefense(t) + if (t.owner == NEUTRAL) -4f else 8f
-            }
-
-        val target = if (normalTargets.isNotEmpty()) {
-            normalTargets.first()
-        } else {
-            coastalTargetsFrom(sx, sy, id)
-                .minByOrNull { effectiveDefense(cells[it.second][it.first]) }
-        } ?: return
-
-        val pct = if (cells[target.second][target.first].owner == NEUTRAL) {
-            0.18f + Random.nextFloat() * 0.12f
-        } else {
-            0.25f + Random.nextFloat() * 0.22f
-        }
-
-        attack(sx, sy, target.first, target.second, id, pct)
-    }
-
-    private fun botBuild(id: Int) {
-        val state = states[id]
-        val own = mutableListOf<Pair<Int, Int>>()
-        val border = mutableListOf<Pair<Int, Int>>()
-        val coast = mutableListOf<Pair<Int, Int>>()
-
-        for (y in 0 until rows) for (x in 0 until cols) {
-            val c = cells[y][x]
-            if (c.owner != id || c.structure != STRUCT_NONE) continue
-            own += x to y
-            if (isCoastal(x, y)) coast += x to y
-            if (neighbors(x, y).any {
-                    val n = cells[it.second][it.first]
-                    n.terrain == LAND && n.owner != id
-                }) {
-                border += x to y
+        if (landCount >= 4 && Random.nextFloat() < 0.10f) {
+            if (state.manpower >= 4f && state.tanks >= 70f && state.equipment >= 45f) {
+                trainDivision(owner, WarRules.ARMOR, spawn.first, spawn.second, ai = true)
+                return
             }
         }
 
-        if (countStructure(id, STRUCT_SILO) > 0 &&
-            state.money >= COST_NUKE &&
-            state.nukes < 2 &&
-            Random.nextFloat() < 0.10f
+        if (divisions.count { it.owner == owner && it.type == WarRules.AIR } < 2 &&
+            state.aircraft >= 45f &&
+            state.manpower >= 1f &&
+            Random.nextFloat() < 0.08f
         ) {
-            state.money -= COST_NUKE
-            state.nukes++
-            return
-        }
-
-        if (own.isEmpty() || Random.nextFloat() > 0.22f) return
-
-        val plan = when {
-            land(id) >= 30 &&
-                state.money >= COST_SILO &&
-                countStructure(id, STRUCT_SILO) == 0 ->
-                Triple(STRUCT_SILO, COST_SILO, own.random())
-
-            state.money >= COST_FACTORY &&
-                countStructure(id, STRUCT_FACTORY) < max(1, land(id) / 22) ->
-                Triple(STRUCT_FACTORY, COST_FACTORY, own.random())
-
-            state.money >= COST_CITY &&
-                countStructure(id, STRUCT_CITY) < max(2, land(id) / 18) ->
-                Triple(STRUCT_CITY, COST_CITY, own.random())
-
-            state.money >= COST_PORT &&
-                coast.isNotEmpty() &&
-                countStructure(id, STRUCT_PORT) < 2 ->
-                Triple(STRUCT_PORT, COST_PORT, coast.random())
-
-            state.money >= COST_FORT && border.isNotEmpty() ->
-                Triple(STRUCT_FORT, COST_FORT, border.random())
-
-            else -> null
-        }
-
-        plan?.let { (structure, cost, pos) ->
-            cells[pos.second][pos.first].structure = structure
-            state.money -= cost
+            trainDivision(owner, WarRules.AIR, spawn.first, spawn.second, ai = true)
         }
     }
 
-    private fun drawWorld(canvas: Canvas) {
-        canvas.drawColor(Color.rgb(10, 15, 23))
+    private fun localDefenseScore(x: Int, y: Int): Float {
+        val p = map[y][x]
+        val unitDefense = landDivisionsAt(x, y).sumOf { it.strength.toDouble() }.toFloat() * 0.18f
+        return p.garrison + p.fort * 8f + unitDefense
+    }
 
-        val top = 78f
-        val toolbarTop = height - 132f
-        val bottom = toolbarTop - 4f
+    private fun distanceToNearestEnemy(owner: Int, x: Int, y: Int): Int {
+        var best = 999
+        for (yy in 0 until rows) {
+            for (xx in 0 until cols) {
+                val p = map[yy][xx]
+                if (p.terrain == WarRules.WATER || p.owner == owner || p.owner == WarRules.NEUTRAL) continue
+                best = min(best, abs(xx - x) + abs(yy - y))
+            }
+        }
+        if (best == 999) {
+            for (yy in 0 until rows) {
+                for (xx in 0 until cols) {
+                    val p = map[yy][xx]
+                    if (p.terrain != WarRules.WATER && p.owner != owner) {
+                        best = min(best, abs(xx - x) + abs(yy - y))
+                    }
+                }
+            }
+        }
+        return best
+    }
+
+    private fun drawGame(canvas: Canvas) {
+        canvas.drawColor(Color.rgb(23, 28, 32))
+
+        val top = 66f
+        val bottomPanel = 148f
+        val mapBottom = height - bottomPanel
         val cw = width / cols.toFloat()
-        val ch = (bottom - top) / rows.toFloat()
+        val ch = (mapBottom - top) / rows.toFloat()
 
-        for (y in 0 until rows) for (x in 0 until cols) {
-            val c = cells[y][x]
-            paint.style = Paint.Style.FILL
-            paint.color = when {
-                c.terrain == WATER -> {
-                    val wave = ((x * 7 + y * 11) % 9) * 2
-                    Color.rgb(20 + wave, 57 + wave, 86 + wave)
-                }
-                c.owner < 0 -> {
-                    val v = (50 + min(24f, c.strength * 1.8f)).toInt()
-                    Color.rgb(v, v + 5, v + 12)
-                }
-                else -> territoryColor(colors[c.owner], c.strength, c.pulse)
-            }
-
-            val left = x * cw
-            val cellTop = top + y * ch
-            canvas.drawRect(left, cellTop, left + cw + 0.4f, cellTop + ch + 0.4f, paint)
-
-            if (c.terrain == LAND) {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = if (c.owner >= 0) 0.8f else 0.45f
-                paint.color = Color.argb(if (c.owner >= 0) 55 else 28, 0, 0, 0)
-                canvas.drawRect(left, cellTop, left + cw, cellTop + ch, paint)
-
-                if (c.structure != STRUCT_NONE && cw > 17f && ch > 14f) {
-                    drawStructure(canvas, c, left, cellTop, cw, ch)
-                }
-            }
-        }
-
-        drawSelection(canvas, top, bottom, cw, ch)
-
-        text.color = Color.WHITE
-        text.textAlign = Paint.Align.LEFT
-        text.textSize = 23f
-        canvas.drawText(
-            "Territory Clash 0.3   Земля ${land(0)}   Армия ${states[0].balance.toInt()}/${balanceCap(0).toInt()}   $${states[0].money.toInt()}   ☢${states[0].nukes}",
-            13f,
-            29f,
-            text
-        )
-
-        text.textSize = 15f
-        text.color = Color.rgb(205, 220, 238)
-        canvas.drawText(
-            "Зажми и веди для захвата • атака тратит общий резерв • порт = дальняя высадка • 1–5 стройки • N/K ядерка",
-            13f,
-            55f,
-            text
-        )
-
-        if (nukeTargetMode) {
-            text.textAlign = Paint.Align.CENTER
-            text.textSize = 20f
-            text.color = Color.rgb(255, 226, 84)
-            canvas.drawText("☢ ВЫБЕРИ ЦЕЛЬ ЯДЕРНОГО УДАРА", width / 2f, 75f, text)
-        }
-
-        drawToolbar(canvas, toolbarTop)
+        drawTopBar(canvas)
+        drawMap(canvas, top, mapBottom, cw, ch)
+        drawFrontLines(canvas, top, cw, ch)
+        drawBattles(canvas, top, cw, ch)
+        drawDivisions(canvas, top, cw, ch)
+        drawCursor(canvas, top, cw, ch)
+        drawBottomPanel(canvas, mapBottom)
 
         gameOver?.let {
             paint.style = Paint.Style.FILL
-            paint.color = Color.argb(220, 0, 0, 0)
-            canvas.drawRect(0f, top, width.toFloat(), bottom, paint)
+            paint.color = Color.argb(220, 8, 10, 12)
+            canvas.drawRect(0f, top, width.toFloat(), mapBottom, paint)
+
             text.textAlign = Paint.Align.CENTER
             text.color = Color.WHITE
-            text.textSize = 40f
-            canvas.drawText(it, width / 2f, (top + bottom) / 2f - 8f, text)
-            text.textSize = 20f
-            canvas.drawText("R — новая игра", width / 2f, (top + bottom) / 2f + 30f, text)
+            text.textSize = 42f
+            text.isFakeBoldText = true
+            canvas.drawText(it, width / 2f, (top + mapBottom) / 2f - 10f, text)
+            text.isFakeBoldText = false
+            text.textSize = 19f
+            canvas.drawText("R — начать новую кампанию", width / 2f, (top + mapBottom) / 2f + 28f, text)
         }
     }
 
-    private fun territoryColor(base: Int, strength: Float, pulse: Float): Int {
-        val r = Color.red(base)
-        val g = Color.green(base)
-        val b = Color.blue(base)
-        val factor = (0.72f + min(0.20f, strength / 250f) + pulse * 0.10f).coerceIn(0.55f, 1.08f)
-        return Color.rgb(
-            (r * factor).toInt().coerceIn(0, 255),
-            (g * factor).toInt().coerceIn(0, 255),
-            (b * factor).toInt().coerceIn(0, 255)
+    private fun drawTopBar(canvas: Canvas) {
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(28, 34, 39)
+        canvas.drawRect(0f, 0f, width.toFloat(), 66f, paint)
+
+        paint.color = Color.rgb(48, 57, 64)
+        canvas.drawRect(0f, 63f, width.toFloat(), 66f, paint)
+
+        val s = nation[0]
+
+        text.textAlign = Paint.Align.LEFT
+        text.color = Color.rgb(232, 235, 238)
+        text.textSize = 20f
+        text.isFakeBoldText = true
+        canvas.drawText("TERRITORY CLASH — COMMAND", 14f, 25f, text)
+
+        text.isFakeBoldText = false
+        text.textSize = 13.5f
+        text.color = Color.rgb(182, 194, 202)
+        canvas.drawText(
+            "ЛС ${String.format("%.1f", s.manpower)}k   Винтовки ${s.equipment.toInt()}   Танки ${s.tanks.toInt()}   Самолёты ${s.aircraft.toInt()}   Топливо ${s.fuel.toInt()}   $${s.money.toInt()}",
+            14f,
+            49f,
+            text
         )
+
+        val speedX = width - 275f
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = 15f
+        text.color = Color.rgb(220, 225, 230)
+        canvas.drawText("День $day", speedX - 56f, 25f, text)
+
+        val labels = arrayOf("Ⅱ", "▶", "▶▶", "▶▶▶")
+        val bw = 52f
+        for (i in labels.indices) {
+            paint.color = if (i == speedIndex) Color.rgb(66, 82, 91) else Color.rgb(35, 42, 48)
+            canvas.drawRoundRect(speedX + i * bw, 8f, speedX + i * bw + 46f, 51f, 5f, 5f, paint)
+            text.color = if (i == speedIndex) Color.WHITE else Color.rgb(165, 174, 180)
+            text.textSize = 14f
+            canvas.drawText(labels[i], speedX + i * bw + 23f, 35f, text)
+        }
     }
 
-    private fun drawSelection(canvas: Canvas, top: Float, bottom: Float, cw: Float, ch: Float) {
-        fun outline(x: Int, y: Int, color: Int, stroke: Float) {
-            if (x !in 0 until cols || y !in 0 until rows) return
-            val left = x * cw
-            val cellTop = top + y * ch
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = stroke
-            paint.color = color
-            canvas.drawRect(
-                left + stroke / 2f,
-                cellTop + stroke / 2f,
-                left + cw - stroke / 2f,
-                cellTop + ch - stroke / 2f,
-                paint
-            )
-        }
+    private fun drawMap(canvas: Canvas, top: Float, bottom: Float, cw: Float, ch: Float) {
+        for (y in 0 until rows) {
+            for (x in 0 until cols) {
+                val p = map[y][x]
+                val left = x * cw
+                val t = top + y * ch
 
-        outline(selectedX, selectedY, Color.WHITE, 3.5f)
-        outline(cursorX, cursorY, Color.rgb(255, 230, 90), 2f)
+                paint.style = Paint.Style.FILL
+                paint.color = provinceColor(p)
+                canvas.drawRect(left, t, left + cw + 0.5f, t + ch + 0.5f, paint)
 
-        if (selectedX >= 0 && selectedY >= 0) {
-            val source = cells[selectedY][selectedX]
-            if (source.structure == STRUCT_PORT && source.owner == 0) {
+                drawTerrainTexture(canvas, p, left, t, cw, ch)
+
                 paint.style = Paint.Style.STROKE
-                paint.strokeWidth = 1.3f
-                paint.color = Color.argb(100, 130, 235, 255)
-                val cx = selectedX * cw + cw / 2
-                val cy = top + selectedY * ch + ch / 2
-                val radius = min(width.toFloat(), bottom - top) * 0.24f
-                canvas.drawCircle(cx, cy, radius, paint)
+                paint.strokeWidth = 0.75f
+                paint.color = Color.argb(80, 15, 18, 20)
+                canvas.drawRect(left, t, left + cw, t + ch, paint)
+
+                drawProvinceStructures(canvas, p, left, t, cw, ch)
             }
         }
     }
 
-    private fun drawStructure(
+    private fun provinceColor(p: Province): Int {
+        if (p.terrain == WarRules.WATER) return Color.rgb(43, 65, 76)
+
+        val base = if (p.owner >= 0) nationColors[p.owner] else Color.rgb(102, 102, 94)
+        val terrainFactor = when (p.terrain) {
+            WarRules.FOREST -> 0.82f
+            WarRules.HILLS -> 0.90f
+            else -> 1f
+        }
+
+        return Color.rgb(
+            (Color.red(base) * terrainFactor).toInt().coerceIn(0, 255),
+            (Color.green(base) * terrainFactor).toInt().coerceIn(0, 255),
+            (Color.blue(base) * terrainFactor).toInt().coerceIn(0, 255)
+        )
+    }
+
+    private fun drawTerrainTexture(
         canvas: Canvas,
-        cell: Cell,
+        p: Province,
         left: Float,
         top: Float,
         cw: Float,
         ch: Float
     ) {
-        val cx = left + cw * 0.5f
-        val cy = top + ch * 0.50f
-        val s = min(cw, ch) * 0.30f
+        if (p.terrain == WarRules.WATER) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.8f
+            paint.color = Color.argb(55, 145, 174, 188)
+            canvas.drawLine(left + 4f, top + ch * 0.35f, left + cw - 4f, top + ch * 0.35f, paint)
+            canvas.drawLine(left + 8f, top + ch * 0.67f, left + cw - 8f, top + ch * 0.67f, paint)
+            return
+        }
+
+        if (p.terrain == WarRules.FOREST) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.8f
+            paint.color = Color.argb(60, 22, 42, 28)
+            canvas.drawLine(left + cw * 0.25f, top + ch * 0.20f, left + cw * 0.15f, top + ch * 0.70f, paint)
+            canvas.drawLine(left + cw * 0.55f, top + ch * 0.12f, left + cw * 0.45f, top + ch * 0.76f, paint)
+            canvas.drawLine(left + cw * 0.80f, top + ch * 0.25f, left + cw * 0.72f, top + ch * 0.72f, paint)
+        }
+
+        if (p.terrain == WarRules.HILLS) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.8f
+            paint.color = Color.argb(65, 44, 39, 30)
+            val path = Path()
+            path.moveTo(left + cw * 0.08f, top + ch * 0.72f)
+            path.quadTo(left + cw * 0.28f, top + ch * 0.28f, left + cw * 0.48f, top + ch * 0.72f)
+            path.quadTo(left + cw * 0.69f, top + ch * 0.35f, left + cw * 0.92f, top + ch * 0.72f)
+            canvas.drawPath(path, paint)
+        }
+    }
+
+    private fun drawProvinceStructures(
+        canvas: Canvas,
+        p: Province,
+        left: Float,
+        top: Float,
+        cw: Float,
+        ch: Float
+    ) {
+        if (p.terrain == WarRules.WATER) return
+
+        val iconY = top + 8f
+        var iconX = left + 6f
 
         paint.style = Paint.Style.FILL
-        paint.color = Color.argb(225, 245, 245, 245)
 
-        when (cell.structure) {
-            STRUCT_CITY -> {
-                canvas.drawRect(cx - s, cy - s * 0.45f, cx - s * 0.25f, cy + s, paint)
-                canvas.drawRect(cx + s * 0.05f, cy - s, cx + s * 0.75f, cy + s, paint)
-            }
+        if (p.city) {
+            paint.color = Color.rgb(225, 220, 194)
+            canvas.drawRect(iconX, iconY, iconX + 5f, iconY + 9f, paint)
+            canvas.drawRect(iconX + 7f, iconY - 3f, iconX + 12f, iconY + 9f, paint)
+            iconX += 16f
+        }
 
-            STRUCT_FACTORY -> {
-                canvas.drawRect(cx - s, cy - s * 0.2f, cx + s, cy + s, paint)
-                canvas.drawRect(cx + s * 0.45f, cy - s, cx + s * 0.85f, cy + s * 0.1f, paint)
-            }
+        if (p.port) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.3f
+            paint.color = Color.rgb(145, 207, 224)
+            canvas.drawCircle(iconX + 4f, iconY + 2f, 3f, paint)
+            canvas.drawLine(iconX + 4f, iconY + 5f, iconX + 4f, iconY + 10f, paint)
+            canvas.drawLine(iconX, iconY + 8f, iconX + 8f, iconY + 8f, paint)
+            iconX += 13f
+        }
 
-            STRUCT_PORT -> {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = max(1.5f, s * 0.22f)
-                paint.color = Color.rgb(160, 240, 255)
-                canvas.drawCircle(cx, cy - s * 0.2f, s * 0.45f, paint)
-                canvas.drawLine(cx, cy + s * 0.15f, cx, cy + s, paint)
-                canvas.drawLine(cx - s * 0.65f, cy + s * 0.55f, cx + s * 0.65f, cy + s * 0.55f, paint)
-            }
+        if (p.fort > 0) {
+            paint.style = Paint.Style.FILL
+            paint.color = Color.rgb(203, 188, 147)
+            canvas.drawRect(iconX, iconY + 1f, iconX + 10f, iconY + 9f, paint)
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 8f
+            text.color = Color.rgb(70, 63, 50)
+            canvas.drawText(p.fort.toString(), iconX + 5f, iconY + 8f, text)
+            iconX += 14f
+        }
 
-            STRUCT_FORT -> {
-                paint.color = Color.rgb(255, 220, 150)
-                canvas.drawRect(cx - s, cy - s * 0.65f, cx + s, cy + s, paint)
-                paint.color = Color.rgb(90, 72, 52)
-                canvas.drawRect(cx - s * 0.35f, cy + s * 0.15f, cx + s * 0.35f, cy + s, paint)
-            }
+        if (p.silo) {
+            paint.style = Paint.Style.FILL
+            paint.color = Color.rgb(209, 133, 125)
+            val path = Path()
+            path.moveTo(iconX + 5f, iconY - 2f)
+            path.lineTo(iconX + 10f, iconY + 9f)
+            path.lineTo(iconX, iconY + 9f)
+            path.close()
+            canvas.drawPath(path, paint)
+        }
+    }
 
-            STRUCT_SILO -> {
-                paint.color = Color.rgb(255, 145, 145)
-                val path = android.graphics.Path()
-                path.moveTo(cx, cy - s)
-                path.lineTo(cx + s * 0.70f, cy + s)
-                path.lineTo(cx - s * 0.70f, cy + s)
-                path.close()
-                canvas.drawPath(path, paint)
+    private fun drawFrontLines(canvas: Canvas, top: Float, cw: Float, ch: Float) {
+        for (y in 0 until rows) {
+            for (x in 0 until cols) {
+                val p = map[y][x]
+                if (p.terrain == WarRules.WATER || p.owner < 0) continue
+
+                val left = x * cw
+                val t = top + y * ch
+
+                fun drawEdge(nx: Int, ny: Int, x1: Float, y1: Float, x2: Float, y2: Float) {
+                    if (nx !in 0 until cols || ny !in 0 until rows) return
+                    val n = map[ny][nx]
+                    if (n.terrain == WarRules.WATER || n.owner < 0 || n.owner == p.owner) return
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = 2.2f
+                    paint.color = Color.argb(220, 40, 31, 28)
+                    canvas.drawLine(x1, y1, x2, y2, paint)
+                    paint.strokeWidth = 0.8f
+                    paint.color = Color.argb(220, 214, 151, 97)
+                    canvas.drawLine(x1, y1, x2, y2, paint)
+                }
+
+                drawEdge(x + 1, y, left + cw, t, left + cw, t + ch)
+                drawEdge(x, y + 1, left, t + ch, left + cw, t + ch)
             }
         }
     }
 
-    private fun drawToolbar(canvas: Canvas, toolbarTop: Float) {
-        val labels = arrayOf(
-            "ГОРОД\n$COST_CITY",
-            "ЗАВОД\n$COST_FACTORY",
-            "ПОРТ\n$COST_PORT",
-            "ФОРТ\n$COST_FORT",
-            "ШАХТА\n$COST_SILO",
-            "☢\n$COST_NUKE",
-            "ЦЕЛЬ",
-            if (music.muted) "♪ OFF" else "♪ ON"
-        )
+    private fun drawDivisions(canvas: Canvas, top: Float, cw: Float, ch: Float) {
+        val grouped = divisions.groupBy { it.x to it.y }
 
-        val buttonW = width / labels.size.toFloat()
-        val top = toolbarTop + 4f
-        val bottom = toolbarTop + 63f
+        for ((pos, units) in grouped) {
+            val (x, y) = pos
+            if (x !in 0 until cols || y !in 0 until rows) continue
 
-        for (i in labels.indices) {
-            paint.style = Paint.Style.FILL
-            paint.color = when {
-                i == 6 && nukeTargetMode -> Color.rgb(121, 77, 28)
-                i == 7 && !music.muted -> Color.rgb(36, 76, 61)
-                else -> Color.rgb(31, 39, 52)
+            val maxVisible = min(3, units.size)
+            for (i in 0 until maxVisible) {
+                val d = units[i]
+                val w = min(48f, cw * 0.86f)
+                val h = min(28f, ch * 0.66f)
+                val cx = x * cw + cw / 2f + i * 5f
+                val cy = top + y * ch + ch / 2f + i * 4f
+                val left = cx - w / 2f
+                val t = cy - h / 2f
+
+                paint.style = Paint.Style.FILL
+                paint.color = Color.rgb(28, 32, 34)
+                canvas.drawRoundRect(left, t, left + w, t + h, 3f, 3f, paint)
+
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = if (d.selected) 2.5f else 1f
+                paint.color = if (d.selected) Color.rgb(245, 215, 96) else Color.rgb(205, 207, 202)
+                canvas.drawRoundRect(left, t, left + w, t + h, 3f, 3f, paint)
+
+                paint.style = Paint.Style.FILL
+                paint.color = unitTypeColor(d.type)
+                canvas.drawRect(left, t, left + w, t + 3.5f, paint)
+
+                text.textAlign = Paint.Align.CENTER
+                text.color = Color.WHITE
+                text.textSize = 10.5f
+                text.isFakeBoldText = true
+                canvas.drawText(unitTypeLabel(d.type), cx, t + 14f, text)
+                text.isFakeBoldText = false
+
+                val barW = w - 8f
+                val barLeft = left + 4f
+                val barTop = t + h - 8f
+
+                paint.color = Color.rgb(65, 70, 72)
+                canvas.drawRect(barLeft, barTop, barLeft + barW, barTop + 2.3f, paint)
+                paint.color = Color.rgb(112, 183, 101)
+                canvas.drawRect(barLeft, barTop, barLeft + barW * (d.strength / 100f), barTop + 2.3f, paint)
+
+                paint.color = Color.rgb(61, 67, 72)
+                canvas.drawRect(barLeft, barTop + 3.5f, barLeft + barW, barTop + 5.8f, paint)
+                paint.color = Color.rgb(78, 145, 205)
+                canvas.drawRect(barLeft, barTop + 3.5f, barLeft + barW * (d.org / 100f), barTop + 5.8f, paint)
             }
-            canvas.drawRoundRect(
-                i * buttonW + 2f,
-                top,
-                (i + 1) * buttonW - 2f,
-                bottom,
-                7f,
-                7f,
-                paint
-            )
 
-            val parts = labels[i].split("\n")
-            text.textAlign = Paint.Align.CENTER
-            text.color = Color.WHITE
-            text.textSize = 12.5f
-            canvas.drawText(parts[0], i * buttonW + buttonW / 2f, top + 22f, text)
-
-            if (parts.size > 1) {
-                text.textSize = 11f
-                text.color = Color.rgb(180, 194, 210)
-                canvas.drawText(parts[1], i * buttonW + buttonW / 2f, top + 43f, text)
+            if (units.size > maxVisible) {
+                text.textAlign = Paint.Align.RIGHT
+                text.textSize = 10f
+                text.color = Color.WHITE
+                canvas.drawText("+${units.size - maxVisible}", x * cw + cw - 2f, top + y * ch + ch - 3f, text)
             }
         }
 
-        text.textAlign = Paint.Align.CENTER
-        text.color = Color.WHITE
-        text.textSize = 18f
-        canvas.drawText(
-            "−      АТАКА ${(attackPercent * 100).toInt()}%      +",
-            width / 2f,
-            toolbarTop + 91f,
-            text
+        for (d in divisions) {
+            if (d.type != WarRules.AIR || d.missionX < 0 || d.missionY < 0) continue
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.2f
+            paint.color = Color.argb(110, 103, 194, 224)
+
+            val x1 = d.x * cw + cw / 2f
+            val y1 = top + d.y * ch + ch / 2f
+            val x2 = d.missionX * cw + cw / 2f
+            val y2 = top + d.missionY * ch + ch / 2f
+            canvas.drawLine(x1, y1, x2, y2, paint)
+        }
+    }
+
+    private fun unitTypeLabel(type: Int): String = when (type) {
+        WarRules.INFANTRY -> "INF"
+        WarRules.ARMOR -> "ARM"
+        WarRules.AIR -> "AIR"
+        else -> "?"
+    }
+
+    private fun unitTypeColor(type: Int): Int = when (type) {
+        WarRules.INFANTRY -> Color.rgb(94, 151, 89)
+        WarRules.ARMOR -> Color.rgb(191, 132, 69)
+        WarRules.AIR -> Color.rgb(78, 159, 196)
+        else -> Color.GRAY
+    }
+
+    private fun drawBattles(canvas: Canvas, top: Float, cw: Float, ch: Float) {
+        for (b in battles) {
+            val left = b.targetX * cw
+            val t = top + b.targetY * ch
+
+            paint.style = Paint.Style.FILL
+            paint.color = Color.argb(205, 28, 28, 28)
+            canvas.drawRoundRect(left + 4f, t + ch - 13f, left + cw - 4f, t + ch - 4f, 3f, 3f, paint)
+
+            val normalized = ((b.progress + 35f) / 135f).coerceIn(0f, 1f)
+            paint.color = Color.rgb(193, 123, 75)
+            canvas.drawRoundRect(
+                left + 5f,
+                t + ch - 12f,
+                left + 5f + (cw - 10f) * normalized,
+                t + ch - 5f,
+                2f,
+                2f,
+                paint
+            )
+
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 11f
+            text.color = Color.rgb(255, 228, 194)
+            canvas.drawText("⚔", left + cw / 2f, t + 15f, text)
+        }
+    }
+
+    private fun drawCursor(canvas: Canvas, top: Float, cw: Float, ch: Float) {
+        if (cursorX !in 0 until cols || cursorY !in 0 until rows) return
+
+        val left = cursorX * cw
+        val t = top + cursorY * ch
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 2f
+        paint.color = Color.argb(220, 235, 215, 116)
+        canvas.drawRect(left + 1f, t + 1f, left + cw - 1f, t + ch - 1f, paint)
+
+        if (selectedProvinceX in 0 until cols && selectedProvinceY in 0 until rows) {
+            val sl = selectedProvinceX * cw
+            val st = top + selectedProvinceY * ch
+            paint.strokeWidth = 1.5f
+            paint.color = Color.argb(190, 230, 235, 238)
+            canvas.drawRect(sl + 3f, st + 3f, sl + cw - 3f, st + ch - 3f, paint)
+        }
+    }
+
+    private fun drawBottomPanel(canvas: Canvas, mapBottom: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(25, 31, 35)
+        canvas.drawRect(0f, mapBottom, width.toFloat(), height.toFloat(), paint)
+
+        paint.color = Color.rgb(50, 59, 65)
+        canvas.drawRect(0f, mapBottom, width.toFloat(), mapBottom + 2f, paint)
+
+        val selected = selectedDivisions()
+        val infoW = width * 0.38f
+
+        text.textAlign = Paint.Align.LEFT
+        text.color = Color.rgb(230, 234, 236)
+        text.textSize = 15f
+        text.isFakeBoldText = true
+
+        val title = if (selected.isEmpty()) {
+            "ПРОВИНЦИЯ"
+        } else {
+            "ВЫБРАНО ДИВИЗИЙ: ${selected.size}"
+        }
+        canvas.drawText(title, 14f, mapBottom + 25f, text)
+        text.isFakeBoldText = false
+
+        text.textSize = 13f
+        text.color = Color.rgb(177, 190, 198)
+
+        if (selected.isEmpty()) {
+            val p = selectedProvince()
+            if (p != null) {
+                val terrain = when (p.terrain) {
+                    WarRules.PLAINS -> "равнина"
+                    WarRules.FOREST -> "лес"
+                    WarRules.HILLS -> "холмы"
+                    else -> "вода"
+                }
+
+                canvas.drawText(
+                    "Местность: $terrain   Владелец: ${ownerName(p.owner)}   Гарнизон: ${p.garrison.toInt()}   Форт: ${p.fort}",
+                    14f,
+                    mapBottom + 48f,
+                    text
+                )
+
+                canvas.drawText(
+                    "Снабжение: ${(supplyLevel(0, selectedProvinceX, selectedProvinceY) * 100).toInt()}%   Город: ${if (p.city) "да" else "нет"}   Порт: ${if (p.port) "да" else "нет"}",
+                    14f,
+                    mapBottom + 69f,
+                    text
+                )
+            } else {
+                canvas.drawText("Тапни по своей провинции или дивизии.", 14f, mapBottom + 48f, text)
+            }
+        } else {
+            val avgStrength = selected.map { it.strength }.average().toFloat()
+            val avgOrg = selected.map { it.org }.average().toFloat()
+            val avgSupply = selected.map { supplyLevel(it.owner, it.x, it.y) }.average().toFloat()
+            val inf = selected.count { it.type == WarRules.INFANTRY }
+            val arm = selected.count { it.type == WarRules.ARMOR }
+            val air = selected.count { it.type == WarRules.AIR }
+
+            canvas.drawText(
+                "Пехота $inf   Танки $arm   Авиация $air   Сила ${avgStrength.toInt()}%   Организация ${avgOrg.toInt()}%   Снабжение ${(avgSupply * 100).toInt()}%",
+                14f,
+                mapBottom + 48f,
+                text
+            )
+
+            canvas.drawText(
+                "Тап по своей провинции — перемещение. Тап по чужой — подготовка/атака. Авиация получает воздушную миссию.",
+                14f,
+                mapBottom + 69f,
+                text
+            )
+        }
+
+        val buttons = arrayOf(
+            "ПЕХОТА",
+            "ТАНКИ",
+            "АВИАЦИЯ",
+            "ФОРТ",
+            "ГОРОД",
+            "ПОРТ",
+            if (nation[0].nukes > 0) "☢ ЦЕЛЬ" else "ШАХТА/☢",
+            if (music.muted) "МУЗ OFF" else "МУЗ ON"
         )
 
-        text.textSize = 13.5f
-        text.color = if (statusTimer > 0f) Color.rgb(206, 225, 255) else Color.LTGRAY
+        val buttonStart = max(infoW, width * 0.39f)
+        val buttonW = (width - buttonStart - 8f) / buttons.size
+        val y1 = mapBottom + 12f
+        val y2 = height - 38f
+
+        for (i in buttons.indices) {
+            val x1 = buttonStart + i * buttonW
+            val x2 = x1 + buttonW - 4f
+
+            paint.style = Paint.Style.FILL
+            paint.color = when {
+                i == 6 && nukeTargetMode -> Color.rgb(105, 66, 43)
+                i == 7 && !music.muted -> Color.rgb(41, 71, 59)
+                else -> Color.rgb(41, 49, 54)
+            }
+            canvas.drawRoundRect(x1, y1, x2, y2, 5f, 5f, paint)
+
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 11.5f
+            text.color = Color.rgb(225, 229, 232)
+            canvas.drawText(buttons[i], (x1 + x2) / 2f, y1 + 24f, text)
+
+            text.textSize = 9.5f
+            text.color = Color.rgb(151, 165, 174)
+            val cost = when (i) {
+                0 -> "6k ЛС / 120 винт."
+                1 -> "4k ЛС / 70 танк."
+                2 -> "1k ЛС / 45 самол."
+                3 -> "$${WarRules.COST_FORT}"
+                4 -> "$${WarRules.COST_CITY}"
+                5 -> "$${WarRules.COST_PORT}"
+                6 -> if (nation[0].nukes > 0) "готово" else "$${WarRules.COST_SILO}+"
+                else -> ""
+            }
+            canvas.drawText(cost, (x1 + x2) / 2f, y1 + 43f, text)
+        }
+
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = 12.5f
+        text.color = if (statusTimer > 0f) Color.rgb(210, 219, 226) else Color.rgb(150, 160, 166)
         canvas.drawText(
-            if (statusTimer > 0f) status else "Выбери свою территорию и веди в сторону цели",
-            width / 2f,
-            toolbarTop + 119f,
+            if (statusTimer > 0f) status else "Space — выбрать/приказать • Esc — снять выделение • 1/2/3 — подготовить дивизию • R — рестарт",
+            14f,
+            height - 13f,
             text
         )
+    }
+
+    private fun ownerName(owner: Int): String = when (owner) {
+        0 -> "Вы"
+        1 -> "Красные"
+        2 -> "Золотые"
+        3 -> "Фиолетовые"
+        4 -> "Зелёные"
+        WarRules.NEUTRAL -> "нейтрал"
+        else -> "море"
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         requestFocus()
-        val toolbarTop = height - 132f
 
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                if (event.y >= toolbarTop) {
-                    handleToolbar(event.x, event.y, toolbarTop)
-                    dragging = false
-                    return true
-                }
+        if (event.actionMasked != MotionEvent.ACTION_DOWN) return true
 
-                val pos = worldCell(event.x, event.y, toolbarTop) ?: return true
-                cursorX = pos.first
-                cursorY = pos.second
-
-                if (nukeTargetMode) {
-                    tryPlayerNuke(pos.first, pos.second)
-                    dragging = false
-                    return true
-                }
-
-                handleWorldPress(pos.first, pos.second)
-                dragging = selectedX >= 0 && selectedY >= 0
-                lastDragX = pos.first
-                lastDragY = pos.second
-            }
-
-            MotionEvent.ACTION_MOVE -> {
-                if (!dragging || nukeTargetMode) return true
-                val pos = worldCell(event.x, event.y, toolbarTop) ?: return true
-                cursorX = pos.first
-                cursorY = pos.second
-
-                if (pos.first == lastDragX && pos.second == lastDragY) return true
-                lastDragX = pos.first
-                lastDragY = pos.second
-                dragInto(pos.first, pos.second)
-            }
-
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                dragging = false
-                lastDragX = -1
-                lastDragY = -1
-            }
+        if (event.y <= 66f) {
+            handleTopTouch(event.x)
+            return true
         }
 
+        val mapBottom = height - 148f
+        if (event.y >= mapBottom) {
+            handleBottomTouch(event.x, event.y, mapBottom)
+            return true
+        }
+
+        val top = 66f
+        val cw = width / cols.toFloat()
+        val ch = (mapBottom - top) / rows.toFloat()
+
+        val x = (event.x / cw).toInt().coerceIn(0, cols - 1)
+        val y = ((event.y - top) / ch).toInt().coerceIn(0, rows - 1)
+
+        cursorX = x
+        cursorY = y
+
+        if (nukeTargetMode) {
+            launchPlayerNuke(x, y)
+            return true
+        }
+
+        handleProvinceTap(x, y)
         return true
     }
 
-    private fun worldCell(xPx: Float, yPx: Float, toolbarTop: Float): Pair<Int, Int>? {
-        val top = 78f
-        val bottom = toolbarTop - 4f
-        if (yPx !in top..bottom) return null
-
-        val x = (xPx / (width / cols.toFloat())).toInt().coerceIn(0, cols - 1)
-        val y = ((yPx - top) / ((bottom - top) / rows)).toInt().coerceIn(0, rows - 1)
-        return x to y
-    }
-
-    private fun handleWorldPress(x: Int, y: Int) {
-        if (gameOver != null) return
-        val c = cells[y][x]
-        if (c.terrain == WATER) {
-            flash("Это море. Для дальних атак выбери свой порт и береговую цель.")
-            return
-        }
-
-        if (c.owner == 0) {
-            selectedX = x
-            selectedY = y
-            return
-        }
-
-        if (selectedX >= 0 && selectedY >= 0) {
-            if (canAttack(selectedX, selectedY, x, y, 0)) {
-                attack(selectedX, selectedY, x, y, 0, attackPercent)
-                if (cells[y][x].owner == 0) {
-                    selectedX = x
-                    selectedY = y
-                }
-                checkEnd()
-            }
+    private fun handleTopTouch(x: Float) {
+        val speedX = width - 275f
+        if (x < speedX) return
+        val index = ((x - speedX) / 52f).toInt()
+        if (index in speeds.indices) {
+            speedIndex = index
+            flash(if (speedIndex == 0) "Пауза" else "Скорость x${speeds[speedIndex].toInt()}")
         }
     }
 
-    private fun dragInto(x: Int, y: Int) {
-        if (selectedX < 0 || selectedY < 0) return
-        val target = cells[y][x]
+    private fun handleBottomTouch(x: Float, y: Float, mapBottom: Float) {
+        val infoW = max(width * 0.38f, width * 0.39f)
+        if (x < infoW || y > height - 38f) return
 
-        if (target.terrain != LAND) return
+        val buttonW = (width - infoW - 8f) / 8f
+        val index = ((x - infoW) / buttonW).toInt().coerceIn(0, 7)
 
-        if (target.owner == 0 && abs(selectedX - x) + abs(selectedY - y) == 1) {
-            selectedX = x
-            selectedY = y
+        when (index) {
+            0 -> playerTrain(WarRules.INFANTRY)
+            1 -> playerTrain(WarRules.ARMOR)
+            2 -> playerTrain(WarRules.AIR)
+            3 -> buildFort()
+            4 -> buildCity()
+            5 -> buildPort()
+            6 -> nuclearButton()
+            7 -> flash(if (music.toggle()) "Музыка включена" else "Музыка выключена")
+        }
+    }
+
+    private fun handleProvinceTap(x: Int, y: Int) {
+        val p = map[y][x]
+        selectedProvinceX = x
+        selectedProvinceY = y
+
+        if (p.terrain == WarRules.WATER) {
+            flash("Морская провинция. Наземные дивизии сюда не переходят.")
             return
         }
 
-        if (!canAttack(selectedX, selectedY, x, y, 0)) return
-
-        attack(selectedX, selectedY, x, y, 0, attackPercent)
-        if (cells[y][x].owner == 0) {
-            selectedX = x
-            selectedY = y
-        }
-        checkEnd()
-    }
-
-    private fun handleToolbar(x: Float, y: Float, toolbarTop: Float) {
-        if (y <= toolbarTop + 66f) {
-            val index = (x / (width / 8f)).toInt().coerceIn(0, 7)
-            when (index) {
-                0 -> buildPlayerStructure(STRUCT_CITY, COST_CITY)
-                1 -> buildPlayerStructure(STRUCT_FACTORY, COST_FACTORY)
-                2 -> buildPlayerStructure(STRUCT_PORT, COST_PORT)
-                3 -> buildPlayerStructure(STRUCT_FORT, COST_FORT)
-                4 -> buildPlayerStructure(STRUCT_SILO, COST_SILO)
-                5 -> buyPlayerNuke()
-                6 -> toggleNukeMode()
-                7 -> flash(if (music.toggle()) "Музыка включена" else "Музыка выключена")
-            }
-        } else if (y <= toolbarTop + 103f) {
-            attackPercent = if (x < width / 2f) {
-                max(0.10f, attackPercent - 0.05f)
+        val selected = selectedDivisions()
+        if (selected.isEmpty()) {
+            val ownUnits = divisions.filter { it.owner == 0 && it.x == x && it.y == y }
+            if (ownUnits.isNotEmpty()) {
+                clearSelection()
+                ownUnits.forEach { it.selected = true }
+                flash("Выбрано дивизий: ${ownUnits.size}. Теперь укажи приказ.")
             } else {
-                min(0.90f, attackPercent + 0.05f)
+                flash(if (p.owner == 0) "Своя провинция выбрана." else "Провинция выбрана.")
+            }
+            return
+        }
+
+        val selectedCell = selected.firstOrNull()?.let { it.x == x && it.y == y } ?: false
+        if (selectedCell && selected.all { it.x == x && it.y == y }) {
+            clearSelection()
+            flash("Выделение снято.")
+            return
+        }
+
+        val air = selected.filter { it.type == WarRules.AIR }
+        val land = selected.filter { it.type != WarRules.AIR }
+
+        if (air.isNotEmpty()) {
+            issueAirMission(air, x, y)
+        }
+
+        if (land.isNotEmpty()) {
+            if (p.owner == 0) {
+                issueFriendlyMove(land, x, y)
+            } else {
+                issueAttackOrder(land, x, y)
             }
         }
     }
 
-    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.action == MotionEvent.ACTION_SCROLL) {
-            attackPercent = (
-                attackPercent +
-                    if (event.getAxisValue(MotionEvent.AXIS_VSCROLL) > 0f) 0.05f else -0.05f
-                ).coerceIn(0.10f, 0.90f)
-            return true
+    private fun issueAirMission(air: List<Division>, x: Int, y: Int) {
+        var assigned = 0
+        for (wing in air) {
+            val range = abs(wing.x - x) + abs(wing.y - y)
+            if (range <= 7) {
+                wing.missionX = x
+                wing.missionY = y
+                assigned++
+            }
         }
-        return super.onGenericMotionEvent(event)
+
+        if (assigned > 0) {
+            flash("Авиация назначена в район: $assigned крыло(а).")
+        } else {
+            flash("Цель вне радиуса авиации. Перебазируй крыло ближе.")
+        }
+    }
+
+    private fun issueFriendlyMove(land: List<Division>, tx: Int, ty: Int) {
+        var ordered = 0
+        for (d in land) {
+            val path = findFriendlyPath(d.owner, d.x, d.y, tx, ty)
+            if (path != null) {
+                d.order.clear()
+                d.order.addAll(path)
+                d.attackX = -1
+                d.attackY = -1
+                d.moveTimer = if (d.type == WarRules.ARMOR) 0.20f else 0.35f
+                ordered++
+            }
+        }
+
+        flash(if (ordered > 0) "Приказ на перемещение: $ordered дивизий." else "Нет сухопутного маршрута по своей территории.")
+    }
+
+    private fun issueAttackOrder(land: List<Division>, tx: Int, ty: Int) {
+        val target = map[ty][tx]
+        if (target.terrain == WarRules.WATER) {
+            flash("Наземная атака по морю невозможна.")
+            return
+        }
+
+        var ordered = 0
+        for (d in land) {
+            d.order.clear()
+            d.attackX = tx
+            d.attackY = ty
+
+            if (adjacent(d.x, d.y, tx, ty)) {
+                joinBattle(d.owner, tx, ty, d.id)
+                ordered++
+                continue
+            }
+
+            val staging = neighbors(tx, ty)
+                .filter {
+                    map[it.second][it.first].owner == d.owner &&
+                        map[it.second][it.first].terrain != WarRules.WATER
+                }
+                .mapNotNull { candidate ->
+                    findFriendlyPath(d.owner, d.x, d.y, candidate.first, candidate.second)
+                        ?.let { path -> candidate to path }
+                }
+                .minByOrNull { it.second.size }
+
+            if (staging != null) {
+                d.order.addAll(staging.second)
+                d.moveTimer = if (d.type == WarRules.ARMOR) 0.20f else 0.35f
+                ordered++
+            } else {
+                d.attackX = -1
+                d.attackY = -1
+            }
+        }
+
+        flash(
+            if (ordered > 0) {
+                "Наступление подготовлено: $ordered дивизий. Захват произойдёт только после победы в бою."
+            } else {
+                "Нет своих провинций рядом с целью — сначала подведи фронт."
+            }
+        )
+    }
+
+    private fun joinBattle(owner: Int, tx: Int, ty: Int, divisionId: Int) {
+        val target = map[ty][tx]
+        if (target.owner == owner || target.terrain == WarRules.WATER) return
+
+        var battle = battles.firstOrNull { it.targetX == tx && it.targetY == ty }
+        if (battle != null && battle.attackerOwner != owner) return
+
+        if (battle == null) {
+            battle = Battle(
+                attackerOwner = owner,
+                targetX = tx,
+                targetY = ty,
+                attackers = mutableListOf(),
+                progress = 0f
+            )
+            battles += battle
+        }
+
+        if (divisionId !in battle.attackers) {
+            battle.attackers += divisionId
+        }
+    }
+
+    private fun playerTrain(type: Int) {
+        val p = selectedProvince()
+        if (p == null || selectedProvinceX < 0 || selectedProvinceY < 0) {
+            flash("Выбери свою провинцию с городом.")
+            return
+        }
+
+        if (p.owner != 0 || !p.city) {
+            flash("Новые части формируются только в своей городской провинции.")
+            return
+        }
+
+        trainDivision(0, type, selectedProvinceX, selectedProvinceY, ai = false)
+    }
+
+    private fun trainDivision(owner: Int, type: Int, x: Int, y: Int, ai: Boolean) {
+        val s = nation[owner]
+
+        when (type) {
+            WarRules.INFANTRY -> {
+                if (s.manpower < 6f || s.equipment < 120f) {
+                    if (!ai) flash("Для пехоты нужно 6k людских ресурсов и 120 винтовок.")
+                    return
+                }
+                s.manpower -= 6f
+                s.equipment -= 120f
+            }
+
+            WarRules.ARMOR -> {
+                if (s.manpower < 4f || s.tanks < 70f || s.equipment < 45f) {
+                    if (!ai) flash("Для танковой дивизии нужно 4k ЛС, 70 танков и 45 снаряжения.")
+                    return
+                }
+                s.manpower -= 4f
+                s.tanks -= 70f
+                s.equipment -= 45f
+            }
+
+            WarRules.AIR -> {
+                if (s.manpower < 1f || s.aircraft < 45f) {
+                    if (!ai) flash("Для авиакрыла нужно 1k ЛС и 45 самолётов.")
+                    return
+                }
+                s.manpower -= 1f
+                s.aircraft -= 45f
+            }
+        }
+
+        addDivision(owner, type, x, y)
+        divisions.last().org = 72f
+        divisions.last().strength = 90f
+        if (!ai) flash("Новая часть сформирована: ${unitTypeLabel(type)}.")
+    }
+
+    private fun buildFort() {
+        val p = selectedOwnedProvince() ?: return
+        if (p.fort >= 5) {
+            flash("Максимальный уровень форта: 5.")
+            return
+        }
+        if (nation[0].money < WarRules.COST_FORT) {
+            flash("На форт нужно $${WarRules.COST_FORT}.")
+            return
+        }
+        nation[0].money -= WarRules.COST_FORT
+        p.fort++
+        flash("Форт усилен до уровня ${p.fort}.")
+    }
+
+    private fun buildCity() {
+        val p = selectedOwnedProvince() ?: return
+        if (p.city) {
+            flash("Здесь уже есть город.")
+            return
+        }
+        if (nation[0].money < WarRules.COST_CITY) {
+            flash("На город нужно $${WarRules.COST_CITY}.")
+            return
+        }
+        nation[0].money -= WarRules.COST_CITY
+        p.city = true
+        flash("Город построен: снабжение и производство улучшены.")
+    }
+
+    private fun buildPort() {
+        val p = selectedOwnedProvince() ?: return
+        if (p.port) {
+            flash("Здесь уже есть порт.")
+            return
+        }
+        if (!isCoastal(selectedProvinceX, selectedProvinceY)) {
+            flash("Порт можно построить только на побережье.")
+            return
+        }
+        if (nation[0].money < WarRules.COST_PORT) {
+            flash("На порт нужно $${WarRules.COST_PORT}.")
+            return
+        }
+        nation[0].money -= WarRules.COST_PORT
+        p.port = true
+        flash("Порт построен: он стал источником снабжения.")
+    }
+
+    private fun nuclearButton() {
+        val s = nation[0]
+
+        if (s.nukes > 0) {
+            nukeTargetMode = !nukeTargetMode
+            flash(if (nukeTargetMode) "☢ Выбери вражескую провинцию." else "Ядерный режим отменён.")
+            return
+        }
+
+        val p = selectedOwnedProvince() ?: return
+        if (!p.silo) {
+            if (s.money < WarRules.COST_SILO) {
+                flash("На ракетную шахту нужно $${WarRules.COST_SILO}.")
+                return
+            }
+            s.money -= WarRules.COST_SILO
+            p.silo = true
+            flash("Ракетная шахта построена. Нажми кнопку ещё раз для производства боеголовки.")
+            return
+        }
+
+        if (s.money < WarRules.COST_NUKE) {
+            flash("На ядерную боеголовку нужно $${WarRules.COST_NUKE}.")
+            return
+        }
+
+        s.money -= WarRules.COST_NUKE
+        s.nukes++
+        flash("Боеголовка готова. Нажми кнопку ещё раз и укажи цель.")
+    }
+
+    private fun launchPlayerNuke(x: Int, y: Int) {
+        val s = nation[0]
+        if (s.nukes <= 0) {
+            nukeTargetMode = false
+            return
+        }
+
+        val target = map[y][x]
+        if (target.terrain == WarRules.WATER || target.owner == 0) {
+            flash("Нужна вражеская наземная цель.")
+            return
+        }
+
+        s.nukes--
+        nukeTargetMode = false
+
+        for (yy in max(0, y - 1)..min(rows - 1, y + 1)) {
+            for (xx in max(0, x - 1)..min(cols - 1, x + 1)) {
+                val p = map[yy][xx]
+                if (p.terrain == WarRules.WATER) continue
+
+                p.garrison *= if (xx == x && yy == y) 0.05f else 0.30f
+                p.fort = max(0, p.fort - 2)
+
+                val units = divisions.filter { it.x == xx && it.y == yy }
+                for (d in units) {
+                    d.strength *= if (xx == x && yy == y) 0.20f else 0.48f
+                    d.org *= 0.18f
+                }
+
+                if (xx == x && yy == y) {
+                    p.owner = WarRules.NEUTRAL
+                }
+            }
+        }
+
+        divisions.removeAll { it.strength <= 2f }
+        flash("☢ Ядерный удар: центр цели нейтрализован, соседние части тяжело повреждены.")
+    }
+
+    private fun selectedOwnedProvince(): Province? {
+        val p = selectedProvince()
+        if (p == null || p.owner != 0) {
+            flash("Сначала выбери свою провинцию.")
+            return null
+        }
+        return p
+    }
+
+    private fun selectedProvince(): Province? {
+        if (selectedProvinceX !in 0 until cols || selectedProvinceY !in 0 until rows) return null
+        return map[selectedProvinceY][selectedProvinceX]
     }
 
     override fun onKeyDown(code: Int, event: KeyEvent): Boolean {
         when (code) {
-            KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_DPAD_LEFT -> cursorX = max(0, cursorX - 1)
-            KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_DPAD_RIGHT -> cursorX = min(cols - 1, cursorX + 1)
-            KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_DPAD_UP -> cursorY = max(0, cursorY - 1)
-            KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_DPAD_DOWN -> cursorY = min(rows - 1, cursorY + 1)
+            KeyEvent.KEYCODE_A,
+            KeyEvent.KEYCODE_DPAD_LEFT -> cursorX = max(0, cursorX - 1)
+
+            KeyEvent.KEYCODE_D,
+            KeyEvent.KEYCODE_DPAD_RIGHT -> cursorX = min(cols - 1, cursorX + 1)
+
+            KeyEvent.KEYCODE_W,
+            KeyEvent.KEYCODE_DPAD_UP -> cursorY = max(0, cursorY - 1)
+
+            KeyEvent.KEYCODE_S,
+            KeyEvent.KEYCODE_DPAD_DOWN -> cursorY = min(rows - 1, cursorY + 1)
 
             KeyEvent.KEYCODE_SPACE,
             KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_DPAD_CENTER -> {
-                if (nukeTargetMode) tryPlayerNuke(cursorX, cursorY)
-                else handleWorldPress(cursorX, cursorY)
+                selectedProvinceX = cursorX
+                selectedProvinceY = cursorY
+                if (nukeTargetMode) launchPlayerNuke(cursorX, cursorY)
+                else handleProvinceTap(cursorX, cursorY)
             }
 
-            KeyEvent.KEYCODE_1 -> buildPlayerStructure(STRUCT_CITY, COST_CITY)
-            KeyEvent.KEYCODE_2 -> buildPlayerStructure(STRUCT_FACTORY, COST_FACTORY)
-            KeyEvent.KEYCODE_3 -> buildPlayerStructure(STRUCT_PORT, COST_PORT)
-            KeyEvent.KEYCODE_4 -> buildPlayerStructure(STRUCT_FORT, COST_FORT)
-            KeyEvent.KEYCODE_5 -> buildPlayerStructure(STRUCT_SILO, COST_SILO)
-            KeyEvent.KEYCODE_N -> buyPlayerNuke()
-            KeyEvent.KEYCODE_K -> toggleNukeMode()
+            KeyEvent.KEYCODE_1 -> playerTrain(WarRules.INFANTRY)
+            KeyEvent.KEYCODE_2 -> playerTrain(WarRules.ARMOR)
+            KeyEvent.KEYCODE_3 -> playerTrain(WarRules.AIR)
+            KeyEvent.KEYCODE_F -> buildFort()
+            KeyEvent.KEYCODE_C -> buildCity()
+            KeyEvent.KEYCODE_P -> buildPort()
+            KeyEvent.KEYCODE_N -> nuclearButton()
             KeyEvent.KEYCODE_M -> music.toggle()
-
-            KeyEvent.KEYCODE_PLUS,
-            KeyEvent.KEYCODE_EQUALS,
-            KeyEvent.KEYCODE_NUMPAD_ADD ->
-                attackPercent = min(0.90f, attackPercent + 0.05f)
-
-            KeyEvent.KEYCODE_MINUS,
-            KeyEvent.KEYCODE_NUMPAD_SUBTRACT ->
-                attackPercent = max(0.10f, attackPercent - 0.05f)
-
             KeyEvent.KEYCODE_R -> reset()
 
             KeyEvent.KEYCODE_ESCAPE,
             KeyEvent.KEYCODE_BACK -> {
+                clearSelection()
                 nukeTargetMode = false
-                selectedX = -1
-                selectedY = -1
+                flash("Выделение снято.")
             }
+
+            KeyEvent.KEYCODE_PLUS,
+            KeyEvent.KEYCODE_EQUALS -> speedIndex = min(speeds.lastIndex, speedIndex + 1)
+
+            KeyEvent.KEYCODE_MINUS -> speedIndex = max(0, speedIndex - 1)
 
             else -> return super.onKeyDown(code, event)
         }
         return true
     }
 
-    private fun attack(
+    private fun findFriendlyPath(
+        owner: Int,
         sx: Int,
         sy: Int,
         tx: Int,
-        ty: Int,
-        id: Int,
-        pct: Float
-    ) {
-        if (!canAttack(sx, sy, tx, ty, id)) return
+        ty: Int
+    ): List<Pair<Int, Int>>? {
+        if (sx == tx && sy == ty) return emptyList()
+        if (map[ty][tx].owner != owner || map[ty][tx].terrain == WarRules.WATER) return null
 
-        val attacker = states[id]
-        if (attacker.balance <= 6f) return
+        val seen = Array(rows) { BooleanArray(cols) }
+        val prevX = Array(rows) { IntArray(cols) { -1 } }
+        val prevY = Array(rows) { IntArray(cols) { -1 } }
+        val q: ArrayDeque<Pair<Int, Int>> = ArrayDeque()
 
-        val source = cells[sy][sx]
-        val target = cells[ty][tx]
+        q.add(sx to sy)
+        seen[sy][sx] = true
 
-        if (target.owner == id) return
+        while (q.isNotEmpty()) {
+            val (x, y) = q.removeFirst()
+            for ((nx, ny) in neighbors(x, y)) {
+                if (seen[ny][nx]) continue
+                val p = map[ny][nx]
+                if (p.owner != owner || p.terrain == WarRules.WATER) continue
 
-        val spend = min(
-            attacker.balance - 5f,
-            max(3f, attacker.balance * pct)
-        )
-        if (spend <= 0f) return
+                seen[ny][nx] = true
+                prevX[ny][nx] = x
+                prevY[ny][nx] = y
 
-        attacker.balance -= spend
+                if (nx == tx && ny == ty) {
+                    val path = mutableListOf<Pair<Int, Int>>()
+                    var cx = tx
+                    var cy = ty
 
-        val defense = effectiveDefense(target)
-        if (target.owner >= 0 && target.owner != id) {
-            states[target.owner].balance = max(0f, states[target.owner].balance - spend * 0.10f)
-        }
-
-        if (spend > defense) {
-            val previousOwner = target.owner
-            target.owner = id
-            target.strength = min(45f, 2f + (spend - defense) * 0.17f)
-            target.pulse = 1f
-
-            if (target.structure == STRUCT_SILO && previousOwner >= 0 && previousOwner != id) {
-                target.structure = STRUCT_NONE
-            }
-
-            attacker.balance = min(balanceCap(id), attacker.balance + min(12f, spend * 0.06f))
-        } else {
-            target.strength = max(0.5f, target.strength - spend / defenseMultiplier(target))
-            target.pulse = 0.65f
-        }
-
-        source.pulse = 0.35f
-    }
-
-    private fun canAttack(sx: Int, sy: Int, tx: Int, ty: Int, id: Int): Boolean {
-        if (sx !in 0 until cols || sy !in 0 until rows ||
-            tx !in 0 until cols || ty !in 0 until rows
-        ) return false
-
-        val source = cells[sy][sx]
-        val target = cells[ty][tx]
-
-        if (source.owner != id || source.terrain != LAND || target.terrain != LAND) return false
-        if (target.owner == id) return false
-
-        if (abs(sx - tx) + abs(sy - ty) == 1) return true
-
-        if (source.structure == STRUCT_PORT &&
-            isCoastal(sx, sy) &&
-            isCoastal(tx, ty)
-        ) {
-            val distance = abs(sx - tx) + abs(sy - ty)
-            return distance in 2..11
-        }
-
-        return false
-    }
-
-    private fun effectiveDefense(cell: Cell): Float {
-        val ownerReserve = if (cell.owner >= 0) states[cell.owner].balance * 0.014f else 0f
-        return (cell.strength + ownerReserve) * defenseMultiplier(cell)
-    }
-
-    private fun defenseMultiplier(cell: Cell): Float = when (cell.structure) {
-        STRUCT_FORT -> 2.15f
-        STRUCT_CITY -> 1.25f
-        STRUCT_SILO -> 1.12f
-        else -> 1f
-    }
-
-    private fun buildPlayerStructure(structure: Int, cost: Int) {
-        val pos = selectedOwnedCell() ?: run {
-            flash("Сначала выбери свою территорию.")
-            return
-        }
-
-        val c = cells[pos.second][pos.first]
-        if (c.structure != STRUCT_NONE) {
-            flash("Здесь уже есть постройка.")
-            return
-        }
-
-        if (structure == STRUCT_PORT && !isCoastal(pos.first, pos.second)) {
-            flash("Порт можно строить только у воды.")
-            return
-        }
-
-        if (states[0].money < cost) {
-            flash("Не хватает денег: нужно $cost.")
-            return
-        }
-
-        states[0].money -= cost
-        c.structure = structure
-        c.pulse = 1f
-
-        flash(
-            when (structure) {
-                STRUCT_CITY -> "Город: больше денег, армии и лимита резерва."
-                STRUCT_FACTORY -> "Завод: заметно ускоряет прирост армии."
-                STRUCT_PORT -> "Порт: выбери его и тапни по чужому побережью."
-                STRUCT_FORT -> "Форт: защита территории усилена более чем вдвое."
-                STRUCT_SILO -> "Ракетная шахта готова — теперь можно собрать ядерку."
-                else -> "Постройка готова."
-            }
-        )
-    }
-
-    private fun buyPlayerNuke() {
-        val pos = selectedOwnedCell() ?: run {
-            flash("Выбери свою ракетную шахту.")
-            return
-        }
-
-        if (cells[pos.second][pos.first].structure != STRUCT_SILO) {
-            flash("Ядерку можно собирать только в ракетной шахте.")
-            return
-        }
-
-        if (states[0].money < COST_NUKE) {
-            flash("На ядерку нужно $COST_NUKE.")
-            return
-        }
-
-        states[0].money -= COST_NUKE
-        states[0].nukes++
-        flash("Ядерная боеголовка готова. Нажми ЦЕЛЬ или K.")
-    }
-
-    private fun toggleNukeMode() {
-        if (states[0].nukes <= 0) {
-            nukeTargetMode = false
-            flash("Нет готовой ядерной боеголовки.")
-            return
-        }
-
-        nukeTargetMode = !nukeTargetMode
-        flash(if (nukeTargetMode) "Выбери любую вражескую наземную цель." else "Ядерный режим отменён.")
-    }
-
-    private fun tryPlayerNuke(x: Int, y: Int) {
-        if (states[0].nukes <= 0) {
-            nukeTargetMode = false
-            flash("Ядерок больше нет.")
-            return
-        }
-
-        val target = cells[y][x]
-        if (target.terrain != LAND || target.owner == 0) {
-            flash("Нужна вражеская или нейтральная наземная цель.")
-            return
-        }
-
-        launchNuke(0, x, y)
-        nukeTargetMode = false
-        selectedX = -1
-        selectedY = -1
-        flash("☢ Удар нанесён. Центр взрыва потерял владельца.")
-        checkEnd()
-    }
-
-    private fun launchNuke(id: Int, x: Int, y: Int) {
-        if (states[id].nukes <= 0) return
-        states[id].nukes--
-
-        for (yy in max(0, y - 2)..min(rows - 1, y + 2)) {
-            for (xx in max(0, x - 2)..min(cols - 1, x + 2)) {
-                val c = cells[yy][xx]
-                if (c.terrain != LAND) continue
-
-                val d = abs(xx - x) + abs(yy - y)
-                when {
-                    d == 0 -> {
-                        c.owner = NEUTRAL
-                        c.strength = 3f
-                        c.structure = STRUCT_NONE
-                        c.pulse = 1f
+                    while (!(cx == sx && cy == sy)) {
+                        path += cx to cy
+                        val px = prevX[cy][cx]
+                        val py = prevY[cy][cx]
+                        cx = px
+                        cy = py
                     }
 
-                    d <= 2 -> {
-                        c.strength = max(1f, c.strength * 0.18f)
-                        c.pulse = 1f
-                        if (Random.nextFloat() < 0.72f) c.structure = STRUCT_NONE
-                        if (c.owner >= 0) {
-                            states[c.owner].balance *= 0.92f
-                        }
-                    }
-
-                    else -> {
-                        c.strength = max(1f, c.strength * 0.55f)
-                        c.pulse = 0.8f
-                    }
+                    path.reverse()
+                    return path
                 }
+
+                q.add(nx to ny)
             }
-        }
-    }
-
-    private fun strongestEnemyTarget(id: Int): Pair<Int, Int>? {
-        var best: Pair<Int, Int>? = null
-        var bestScore = -1f
-
-        for (y in 0 until rows) for (x in 0 until cols) {
-            val c = cells[y][x]
-            if (c.terrain != LAND || c.owner < 0 || c.owner == id) continue
-
-            val score =
-                c.strength +
-                when (c.structure) {
-                    STRUCT_CITY -> 55f
-                    STRUCT_FACTORY -> 48f
-                    STRUCT_SILO -> 95f
-                    STRUCT_PORT -> 34f
-                    STRUCT_FORT -> 40f
-                    else -> 0f
-                } +
-                states[c.owner].balance * 0.03f
-
-            if (score > bestScore) {
-                bestScore = score
-                best = x to y
-            }
-        }
-
-        return best
-    }
-
-    private fun selectedOwnedCell(): Pair<Int, Int>? {
-        if (selectedX in 0 until cols &&
-            selectedY in 0 until rows &&
-            cells[selectedY][selectedX].owner == 0
-        ) {
-            return selectedX to selectedY
-        }
-
-        if (cursorX in 0 until cols &&
-            cursorY in 0 until rows &&
-            cells[cursorY][cursorX].owner == 0
-        ) {
-            return cursorX to cursorY
         }
 
         return null
     }
 
-    private fun coastalTargetsFrom(x: Int, y: Int, id: Int): List<Pair<Int, Int>> {
-        if (cells[y][x].structure != STRUCT_PORT || !isCoastal(x, y)) return emptyList()
-
-        val out = mutableListOf<Pair<Int, Int>>()
-        for (ty in 0 until rows) for (tx in 0 until cols) {
-            val t = cells[ty][tx]
-            if (t.terrain != LAND || t.owner == id || !isCoastal(tx, ty)) continue
-            val distance = abs(x - tx) + abs(y - ty)
-            if (distance in 2..11) out += tx to ty
-        }
-        return out
+    private fun clearSelection() {
+        for (d in divisions) d.selected = false
     }
 
-    private fun isCoastal(x: Int, y: Int): Boolean {
-        if (cells[y][x].terrain != LAND) return false
-        return neighborsAll(x, y).any {
-            cells[it.second][it.first].terrain == WATER
-        }
-    }
+    private fun selectedDivisions(): List<Division> = divisions.filter { it.owner == 0 && it.selected }
+
+    private fun divisionById(id: Int): Division? = divisions.firstOrNull { it.id == id }
+
+    private fun landDivisionsAt(x: Int, y: Int): List<Division> =
+        divisions.filter { it.x == x && it.y == y && it.type != WarRules.AIR }
+
+    private fun adjacent(x1: Int, y1: Int, x2: Int, y2: Int): Boolean =
+        abs(x1 - x2) + abs(y1 - y2) == 1
 
     private fun neighbors(x: Int, y: Int): List<Pair<Int, Int>> = buildList {
         if (x > 0) add(x - 1 to y)
@@ -1098,44 +1796,61 @@ class GameView(
         if (y < rows - 1) add(x to y + 1)
     }
 
-    private fun neighborsAll(x: Int, y: Int): List<Pair<Int, Int>> = buildList {
-        for (dy in -1..1) for (dx in -1..1) {
-            if (dx == 0 && dy == 0) continue
-            val nx = x + dx
-            val ny = y + dy
-            if (nx in 0 until cols && ny in 0 until rows) add(nx to ny)
-        }
+    private fun isCoastal(x: Int, y: Int): Boolean {
+        if (map[y][x].terrain == WarRules.WATER) return false
+        return neighbors(x, y).any { map[it.second][it.first].terrain == WarRules.WATER }
     }
 
-    private fun countStructure(id: Int, structure: Int): Int {
+    private fun findNearestCoast(owner: Int, sx: Int, sy: Int): Pair<Int, Int>? {
+        return ownedProvinces(owner)
+            .filter { isCoastal(it.first, it.second) }
+            .minByOrNull { abs(it.first - sx) + abs(it.second - sy) }
+    }
+
+    private fun provinceCount(owner: Int): Int {
         var count = 0
-        for (row in cells) for (c in row) {
-            if (c.owner == id && c.structure == structure) count++
-        }
+        for (row in map) for (p in row) if (p.owner == owner) count++
         return count
     }
 
-    private fun land(id: Int): Int {
+    private fun countCities(owner: Int): Int {
         var count = 0
-        for (row in cells) for (c in row) if (c.owner == id) count++
+        for (row in map) for (p in row) if (p.owner == owner && p.city) count++
         return count
+    }
+
+    private fun countPorts(owner: Int): Int {
+        var count = 0
+        for (row in map) for (p in row) if (p.owner == owner && p.port) count++
+        return count
+    }
+
+    private fun ownedProvinces(owner: Int): List<Pair<Int, Int>> {
+        val result = mutableListOf<Pair<Int, Int>>()
+        for (y in 0 until rows) {
+            for (x in 0 until cols) {
+                if (map[y][x].owner == owner) result += x to y
+            }
+        }
+        return result
+    }
+
+    private fun checkVictory() {
+        if (provinceCount(0) == 0 || divisions.none { it.owner == 0 && it.type != WarRules.AIR }) {
+            gameOver = "КАМПАНИЯ ПРОИГРАНА"
+            speedIndex = 0
+            return
+        }
+
+        val livingEnemies = (1 until nations).count { provinceCount(it) > 0 }
+        if (livingEnemies == 0) {
+            gameOver = "ПОБЕДА В КАМПАНИИ"
+            speedIndex = 0
+        }
     }
 
     private fun flash(message: String) {
         status = message
-        statusTimer = 3.8f
-    }
-
-    private fun checkEnd() {
-        if (land(0) == 0) {
-            gameOver = "Поражение"
-            dragging = false
-            return
-        }
-
-        if ((1 until factions).all { land(it) == 0 }) {
-            gameOver = "Победа!"
-            dragging = false
-        }
+        statusTimer = 4f
     }
 }
