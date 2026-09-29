@@ -42,6 +42,7 @@ class GameView(
     private var settingsOpen = false
     private var currentEvent: HistoricalEvent? = null
     private val historicalEvents = mutableListOf<HistoricalEvent>()
+    private val wars = Array(nations) { BooleanArray(nations) }
 
     companion object {
         private const val SCREEN_MAIN_MENU = 0
@@ -94,6 +95,9 @@ class GameView(
         settingsOpen = false
         currentEvent = null
         historicalEvents.clear()
+        for (i in 0 until nations) {
+            for (j in 0 until nations) wars[i][j] = false
+        }
         historicalEvents += HistoricalEvent(
             67,
             "Ремилитаризация Рейнской области",
@@ -117,6 +121,18 @@ class GameView(
             "Мюнхенское соглашение",
             "29–30 сентября 1938 года было заключено Мюнхенское соглашение по Судетской области.",
             "Чехословацкая граница оказывается под новым давлением."
+        )
+        historicalEvents += HistoricalEvent(
+            1340,
+            "Вторжение в Польшу",
+            "1 сентября 1939 года Германия вторглась в Польшу.",
+            "В Европе начинается большая война."
+        )
+        historicalEvents += HistoricalEvent(
+            1342,
+            "Британия и Франция вступают в войну",
+            "3 сентября 1939 года Великобритания и Франция объявили войну Германии.",
+            "Западный фронт становится активным."
         )
 
         for (i in 0 until nations) {
@@ -779,7 +795,10 @@ class GameView(
         val enemyAdjacent = neighbors(d.x, d.y)
             .filter {
                 val p = map[it.second][it.first]
-                p.terrain != WarRules.WATER && p.owner != owner
+                p.terrain != WarRules.WATER &&
+                    p.owner >= 0 &&
+                    p.owner != owner &&
+                    atWar(owner, p.owner)
             }
             .minByOrNull {
                 localDefenseScore(it.first, it.second)
@@ -852,18 +871,9 @@ class GameView(
         for (yy in 0 until rows) {
             for (xx in 0 until cols) {
                 val p = map[yy][xx]
-                if (p.terrain == WarRules.WATER || p.owner == owner || p.owner == WarRules.NEUTRAL) continue
+                if (p.terrain == WarRules.WATER || p.owner < 0 || p.owner == owner) continue
+                if (!atWar(owner, p.owner)) continue
                 best = min(best, abs(xx - x) + abs(yy - y))
-            }
-        }
-        if (best == 999) {
-            for (yy in 0 until rows) {
-                for (xx in 0 until cols) {
-                    val p = map[yy][xx]
-                    if (p.terrain != WarRules.WATER && p.owner != owner) {
-                        best = min(best, abs(xx - x) + abs(yy - y))
-                    }
-                }
             }
         }
         return best
@@ -1719,6 +1729,18 @@ class GameView(
             199 -> nation[0].fuel += 60f
             802 -> nation[0].equipment += 90f
             1003 -> nation[0].money += 50f
+            1340 -> {
+                val ger = ownerByTag("GER")
+                val pol = ownerByTag("POL")
+                if (ger >= 0 && pol >= 0) declareWar(ger, pol)
+            }
+            1342 -> {
+                val ger = ownerByTag("GER")
+                val fra = ownerByTag("FRA")
+                val uk = ownerByTag("UK")
+                if (ger >= 0 && fra >= 0) declareWar(ger, fra)
+                if (ger >= 0 && uk >= 0) declareWar(ger, uk)
+            }
         }
     }
 
@@ -1761,6 +1783,20 @@ class GameView(
         text.textSize = 13f * settings.uiScale
         text.color = Color.WHITE
         canvas.drawText("ПРОДОЛЖИТЬ", width / 2f, top + 188f, text)
+    }
+
+    private fun ownerByTag(tag: String): Int =
+        nationTags.indexOfFirst { it == tag }
+
+    private fun atWar(a: Int, b: Int): Boolean {
+        if (a !in 0 until nations || b !in 0 until nations) return false
+        return wars[a][b]
+    }
+
+    private fun declareWar(a: Int, b: Int) {
+        if (a !in 0 until nations || b !in 0 until nations || a == b) return
+        wars[a][b] = true
+        wars[b][a] = true
     }
 
     private fun ownerName(owner: Int): String = when {
@@ -2028,6 +2064,11 @@ class GameView(
             return
         }
 
+        if (target.owner >= 0 && target.owner != 0 && !atWar(0, target.owner)) {
+            declareWar(0, target.owner)
+            flash("Объявлена война: ${nationNames[0]} → ${nationNames[target.owner]}.")
+        }
+
         var ordered = 0
         for (d in land) {
             d.order.clear()
@@ -2073,6 +2114,7 @@ class GameView(
     private fun joinBattle(owner: Int, tx: Int, ty: Int, divisionId: Int) {
         val target = map[ty][tx]
         if (target.owner == owner || target.terrain == WarRules.WATER) return
+        if (target.owner >= 0 && !atWar(owner, target.owner)) return
 
         var battle = battles.firstOrNull { it.targetX == tx && it.targetY == ty }
         if (battle != null && battle.attackerOwner != owner) return
