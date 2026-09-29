@@ -12,18 +12,59 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.random.Random
 
-class GameView(context: Context) : View(context) {
-    data class Cell(var owner: Int = -1, var troops: Float = 1f)
+class GameView(
+    context: Context,
+    private val music: BackgroundMusic
+) : View(context) {
 
-    private val cols = 24
-    private val rows = 14
+    data class Cell(
+        var terrain: Int = LAND,
+        var owner: Int = NEUTRAL,
+        var troops: Float = 1f,
+        var structure: Int = STRUCT_NONE
+    )
+
+    data class FactionState(
+        var money: Float = 260f,
+        var nukes: Int = 0
+    )
+
+    companion object {
+        const val LAND = 0
+        const val WATER = 1
+        const val NEUTRAL = -1
+        const val WATER_OWNER = -2
+
+        const val STRUCT_NONE = 0
+        const val STRUCT_CITY = 1
+        const val STRUCT_FACTORY = 2
+        const val STRUCT_PORT = 3
+        const val STRUCT_FORT = 4
+        const val STRUCT_SILO = 5
+
+        const val COST_CITY = 120
+        const val COST_FACTORY = 160
+        const val COST_PORT = 140
+        const val COST_FORT = 100
+        const val COST_SILO = 260
+        const val COST_NUKE = 380
+    }
+
+    private val cols = 26
+    private val rows = 15
     private val factions = 5
     private val cells = Array(rows) { Array(cols) { Cell() } }
+    private val states = Array(factions) { FactionState() }
+
     private val colors = intArrayOf(
-        Color.rgb(50,145,255), Color.rgb(235,70,85), Color.rgb(255,165,50),
-        Color.rgb(170,90,235), Color.rgb(70,205,130)
+        Color.rgb(49, 145, 255),
+        Color.rgb(235, 72, 86),
+        Color.rgb(255, 164, 55),
+        Color.rgb(172, 92, 235),
+        Color.rgb(67, 205, 127)
     )
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
@@ -33,10 +74,14 @@ class GameView(context: Context) : View(context) {
     private var selectedY = -1
     private var cursorX = 3
     private var cursorY = rows / 2
-    private var attackPercent = .5f
+    private var attackPercent = 0.55f
     private var last = System.nanoTime()
     private var botClock = 0f
+    private var economyClock = 0f
     private var gameOver: String? = null
+    private var nukeTargetMode = false
+    private var status = "Захватывай территорию и строй экономику"
+    private var statusTimer = 3f
 
     init {
         isFocusable = true
@@ -45,42 +90,113 @@ class GameView(context: Context) : View(context) {
     }
 
     private fun reset() {
-        for (y in 0 until rows) for (x in 0 until cols) {
-            cells[y][x].owner = -1
-            cells[y][x].troops = 1f + Random.nextFloat() * 3f
+        for (id in 0 until factions) {
+            states[id].money = 260f
+            states[id].nukes = 0
         }
-        val starts = listOf(3 to rows/2, cols-4 to rows/2, cols/2 to 2, cols/2 to rows-3, cols/2 to rows/2)
-        starts.forEachIndexed { id, (sx, sy) ->
-            for (dy in -1..1) for (dx in -1..1) {
-                val x = (sx+dx).coerceIn(0, cols-1)
-                val y = (sy+dy).coerceIn(0, rows-1)
-                cells[y][x].owner = id
-                cells[y][x].troops = if (dx == 0 && dy == 0) 20f else 8f
+
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val water =
+                (x in 8..10 && y in 2..5) ||
+                (x in 15..17 && y in 9..12) ||
+                (x in 19..21 && y in 3..4) ||
+                (x in 5..6 && y in 10..12)
+
+            val cell = cells[y][x]
+            if (water) {
+                cell.terrain = WATER
+                cell.owner = WATER_OWNER
+                cell.troops = 0f
+                cell.structure = STRUCT_NONE
+            } else {
+                cell.terrain = LAND
+                cell.owner = NEUTRAL
+                cell.troops = 2f + Random.nextFloat() * 5f
+                cell.structure = STRUCT_NONE
             }
         }
+
+        val starts = listOf(
+            3 to rows / 2,
+            cols - 4 to rows / 2,
+            cols / 2 to 2,
+            cols / 2 to rows - 3,
+            cols / 2 to rows / 2
+        )
+
+        starts.forEachIndexed { id, (sx, sy) ->
+            for (dy in -1..1) for (dx in -1..1) {
+                val x = (sx + dx).coerceIn(0, cols - 1)
+                val y = (sy + dy).coerceIn(0, rows - 1)
+                val c = cells[y][x]
+                c.terrain = LAND
+                c.owner = id
+                c.troops = if (dx == 0 && dy == 0) 28f else 10f
+                c.structure = if (dx == 0 && dy == 0) STRUCT_CITY else STRUCT_NONE
+            }
+        }
+
         selectedX = -1
         selectedY = -1
         cursorX = 3
-        cursorY = rows/2
+        cursorY = rows / 2
+        attackPercent = 0.55f
+        nukeTargetMode = false
         gameOver = null
+        status = "Город приносит деньги. Фабрика растит армию. Порт даёт морскую дальность."
+        statusTimer = 6f
+        botClock = 0f
+        economyClock = 0f
         last = System.nanoTime()
         invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         val now = System.nanoTime()
-        val dt = ((now-last)/1_000_000_000f).coerceIn(0f,.05f)
+        val dt = ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
         last = now
+
         update(dt)
         drawWorld(canvas)
         postInvalidateOnAnimation()
     }
 
     private fun update(dt: Float) {
+        if (statusTimer > 0f) statusTimer -= dt
         if (gameOver != null) return
-        for (row in cells) for (c in row) if (c.owner >= 0) c.troops = min(99f, c.troops + dt*.5f)
+
+        economyClock += dt
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val c = cells[y][x]
+            if (c.owner < 0 || c.terrain == WATER) continue
+
+            var growth = 0.035f
+            growth += when (c.structure) {
+                STRUCT_CITY -> 0.32f
+                STRUCT_FACTORY -> 0.78f
+                STRUCT_PORT -> 0.10f
+                STRUCT_FORT -> 0.03f
+                STRUCT_SILO -> 0.04f
+                else -> 0f
+            }
+            c.troops = min(250f, c.troops + dt * growth)
+        }
+
+        if (economyClock >= 0.25f) {
+            val step = economyClock
+            economyClock = 0f
+            for (id in 0 until factions) {
+                val income = 2.3f +
+                    land(id) * 0.025f +
+                    countStructure(id, STRUCT_CITY) * 0.9f +
+                    countStructure(id, STRUCT_PORT) * 0.45f +
+                    countStructure(id, STRUCT_FACTORY) * 0.15f
+                states[id].money += income * step
+            }
+        }
+
         botClock += dt
-        if (botClock > .7f) {
+        if (botClock >= 0.75f) {
             botClock = 0f
             for (id in 1 until factions) botTurn(id)
             checkEnd()
@@ -88,147 +204,675 @@ class GameView(context: Context) : View(context) {
     }
 
     private fun botTurn(id: Int) {
-        val src = mutableListOf<Pair<Int,Int>>()
-        for (y in 0 until rows) for (x in 0 until cols)
-            if (cells[y][x].owner == id && cells[y][x].troops > 7f && neighbors(x,y).any { cells[it.second][it.first].owner != id })
-                src += x to y
-        if (src.isEmpty()) return
-        val (sx,sy) = src.random()
-        val targets = neighbors(sx,sy).filter { cells[it.second][it.first].owner != id }
-        if (targets.isEmpty()) return
-        val (tx,ty) = targets.minByOrNull { cells[it.second][it.first].troops } ?: return
-        move(sx,sy,tx,ty,id,.55f)
-    }
+        if (land(id) == 0) return
 
-    private fun drawWorld(c: Canvas) {
-        c.drawColor(Color.rgb(15,20,28))
-        val top = 70f
-        val bottom = height - 90f
-        val cw = width / cols.toFloat()
-        val ch = (bottom-top) / rows.toFloat()
+        botBuild(id)
 
-        for (y in 0 until rows) for (x in 0 until cols) {
-            val cell = cells[y][x]
-            p.style = Paint.Style.FILL
-            p.color = if (cell.owner < 0) Color.rgb(50,56,66) else colors[cell.owner]
-            c.drawRect(x*cw+1, top+y*ch+1, (x+1)*cw-1, top+(y+1)*ch-1, p)
-            if (cw > 28f) {
-                text.textSize = min(cw,ch)*.3f
-                c.drawText(cell.troops.toInt().toString(), x*cw+cw/2, top+y*ch+ch*.62f, text)
+        if (states[id].nukes > 0 && Random.nextFloat() < 0.10f) {
+            val target = strongestEnemyTarget(id)
+            if (target != null) {
+                launchNuke(id, target.first, target.second)
+                return
             }
         }
 
-        fun outline(x:Int,y:Int,color:Int,stroke:Float) {
-            if (x < 0 || y < 0) return
-            p.style = Paint.Style.STROKE
-            p.strokeWidth = stroke
-            p.color = color
-            c.drawRect(x*cw+3, top+y*ch+3, (x+1)*cw-3, top+(y+1)*ch-3, p)
+        val sources = mutableListOf<Pair<Int, Int>>()
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val c = cells[y][x]
+            if (c.owner != id || c.troops < 8f) continue
+            val hasBorder = neighbors(x, y).any {
+                val t = cells[it.second][it.first]
+                t.terrain == LAND && t.owner != id
+            }
+            val naval = c.structure == STRUCT_PORT && coastalTargetsFrom(x, y, id).isNotEmpty()
+            if (hasBorder || naval) sources += x to y
         }
-        outline(selectedX,selectedY,Color.WHITE,5f)
-        outline(cursorX,cursorY,Color.YELLOW,3f)
+        if (sources.isEmpty()) return
 
-        text.textAlign = Paint.Align.LEFT
-        text.textSize = 27f
-        c.drawText("Territory Clash   Земля: ${land(0)}   Армия: ${army(0).toInt()}", 18f, 32f, text)
-        text.textSize = 18f
-        c.drawText("Тап/мышь: своя клетка → соседняя | WASD/стрелки + Space | +/- сила | R рестарт",18f,57f,text)
-        text.textAlign = Paint.Align.CENTER
-        text.textSize = 24f
-        c.drawText("Атака: ${(attackPercent*100).toInt()}%", width/2f, height-35f, text)
-        gameOver?.let {
-            p.style = Paint.Style.FILL
-            p.color = Color.argb(210,0,0,0)
-            c.drawRect(0f,top,width.toFloat(),bottom,p)
-            text.textSize = 36f
-            c.drawText(it + " — R для рестарта",width/2f,(top+bottom)/2f,text)
+        val (sx, sy) = sources.random()
+        val normal = neighbors(sx, sy).filter {
+            val t = cells[it.second][it.first]
+            t.terrain == LAND && t.owner != id
         }
+
+        val target = if (normal.isNotEmpty()) {
+            normal.minByOrNull { effectiveDefense(cells[it.second][it.first]) }
+        } else {
+            coastalTargetsFrom(sx, sy, id).minByOrNull {
+                effectiveDefense(cells[it.second][it.first])
+            }
+        } ?: return
+
+        move(sx, sy, target.first, target.second, id, 0.58f)
     }
 
-    override fun onTouchEvent(e: MotionEvent): Boolean {
-        requestFocus()
-        if (e.action != MotionEvent.ACTION_DOWN) return true
-        val top = 70f
-        val bottom = height - 90f
-        if (e.y !in top..bottom) {
-            if (e.y > bottom) attackPercent = if (e.x < width/2) max(.1f,attackPercent-.1f) else min(.9f,attackPercent+.1f)
-            return true
-        }
-        val x = (e.x / (width/cols.toFloat())).toInt().coerceIn(0,cols-1)
-        val y = ((e.y-top) / ((bottom-top)/rows)).toInt().coerceIn(0,rows-1)
-        cursorX=x; cursorY=y; activate(x,y)
-        return true
-    }
+    private fun botBuild(id: Int) {
+        val state = states[id]
+        val own = mutableListOf<Pair<Int, Int>>()
+        val border = mutableListOf<Pair<Int, Int>>()
+        val coast = mutableListOf<Pair<Int, Int>>()
 
-    override fun onGenericMotionEvent(e: MotionEvent): Boolean {
-        if (e.action == MotionEvent.ACTION_SCROLL) {
-            attackPercent = (attackPercent + if (e.getAxisValue(MotionEvent.AXIS_VSCROLL)>0) .05f else -.05f).coerceIn(.1f,.9f)
-            return true
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val c = cells[y][x]
+            if (c.owner != id || c.structure != STRUCT_NONE) continue
+            own += x to y
+            if (neighbors(x, y).any { cells[it.second][it.first].owner != id && cells[it.second][it.first].terrain == LAND }) {
+                border += x to y
+            }
+            if (isCoastal(x, y)) coast += x to y
         }
-        return super.onGenericMotionEvent(e)
-    }
 
-    override fun onKeyDown(code: Int, e: KeyEvent): Boolean {
-        when(code) {
-            KeyEvent.KEYCODE_A,KeyEvent.KEYCODE_DPAD_LEFT -> cursorX=max(0,cursorX-1)
-            KeyEvent.KEYCODE_D,KeyEvent.KEYCODE_DPAD_RIGHT -> cursorX=min(cols-1,cursorX+1)
-            KeyEvent.KEYCODE_W,KeyEvent.KEYCODE_DPAD_UP -> cursorY=max(0,cursorY-1)
-            KeyEvent.KEYCODE_S,KeyEvent.KEYCODE_DPAD_DOWN -> cursorY=min(rows-1,cursorY+1)
-            KeyEvent.KEYCODE_SPACE,KeyEvent.KEYCODE_ENTER,KeyEvent.KEYCODE_DPAD_CENTER -> activate(cursorX,cursorY)
-            KeyEvent.KEYCODE_PLUS,KeyEvent.KEYCODE_EQUALS,KeyEvent.KEYCODE_NUMPAD_ADD -> attackPercent=min(.9f,attackPercent+.1f)
-            KeyEvent.KEYCODE_MINUS,KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> attackPercent=max(.1f,attackPercent-.1f)
-            KeyEvent.KEYCODE_R -> reset()
-            else -> return super.onKeyDown(code,e)
-        }
-        return true
-    }
-
-    private fun activate(x:Int,y:Int) {
-        if (gameOver != null) return
-        if (selectedX < 0) {
-            if (cells[y][x].owner == 0) { selectedX=x; selectedY=y }
+        if (countStructure(id, STRUCT_SILO) > 0 && state.money >= COST_NUKE && state.nukes < 2 && Random.nextFloat() < 0.22f) {
+            state.money -= COST_NUKE
+            state.nukes++
             return
         }
-        if (x==selectedX && y==selectedY) { selectedX=-1; selectedY=-1; return }
-        if (adj(selectedX,selectedY,x,y)) {
-            move(selectedX,selectedY,x,y,0,attackPercent)
-            if (cells[y][x].owner==0) { selectedX=x; selectedY=y }
+
+        if (own.isEmpty() || Random.nextFloat() > 0.42f) return
+
+        val choice = when {
+            state.money >= COST_SILO && countStructure(id, STRUCT_SILO) == 0 && land(id) >= 18 ->
+                Triple(STRUCT_SILO, COST_SILO, own.random())
+            state.money >= COST_FACTORY && countStructure(id, STRUCT_FACTORY) < 3 ->
+                Triple(STRUCT_FACTORY, COST_FACTORY, own.random())
+            state.money >= COST_CITY && countStructure(id, STRUCT_CITY) < max(2, land(id) / 12) ->
+                Triple(STRUCT_CITY, COST_CITY, own.random())
+            state.money >= COST_PORT && coast.isNotEmpty() && countStructure(id, STRUCT_PORT) < 2 ->
+                Triple(STRUCT_PORT, COST_PORT, coast.random())
+            state.money >= COST_FORT && border.isNotEmpty() ->
+                Triple(STRUCT_FORT, COST_FORT, border.random())
+            else -> null
+        }
+
+        if (choice != null) {
+            val (structure, cost, pos) = choice
+            cells[pos.second][pos.first].structure = structure
+            state.money -= cost
+        }
+    }
+
+    private fun strongestEnemyTarget(id: Int): Pair<Int, Int>? {
+        var best: Pair<Int, Int>? = null
+        var score = -1f
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val c = cells[y][x]
+            if (c.terrain != LAND || c.owner < 0 || c.owner == id) continue
+            val s = c.troops + when (c.structure) {
+                STRUCT_CITY -> 50f
+                STRUCT_FACTORY -> 45f
+                STRUCT_SILO -> 80f
+                STRUCT_PORT -> 30f
+                STRUCT_FORT -> 35f
+                else -> 0f
+            }
+            if (s > score) {
+                score = s
+                best = x to y
+            }
+        }
+        return best
+    }
+
+    private fun drawWorld(canvas: Canvas) {
+        canvas.drawColor(Color.rgb(13, 18, 27))
+
+        val top = 82f
+        val toolbarTop = height - 126f
+        val bottom = toolbarTop - 4f
+        val cw = width / cols.toFloat()
+        val ch = (bottom - top) / rows.toFloat()
+
+        for (y in 0 until rows) for (x in 0 until cols) {
+            val cell = cells[y][x]
+            paint.style = Paint.Style.FILL
+            paint.color = when {
+                cell.terrain == WATER -> Color.rgb(24, 66, 94)
+                cell.owner < 0 -> Color.rgb(55, 61, 72)
+                else -> colors[cell.owner]
+            }
+            canvas.drawRect(
+                x * cw + 1f,
+                top + y * ch + 1f,
+                (x + 1) * cw - 1f,
+                top + (y + 1) * ch - 1f,
+                paint
+            )
+
+            if (cell.terrain == LAND && cw > 24f && ch > 18f) {
+                text.textAlign = Paint.Align.CENTER
+                text.textSize = min(cw, ch) * 0.28f
+                text.color = Color.WHITE
+                canvas.drawText(
+                    cell.troops.toInt().toString(),
+                    x * cw + cw / 2f,
+                    top + y * ch + ch * 0.65f,
+                    text
+                )
+                drawStructure(canvas, cell, x * cw, top + y * ch, cw, ch)
+            }
+        }
+
+        fun outline(x: Int, y: Int, color: Int, stroke: Float) {
+            if (x < 0 || y < 0) return
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = stroke
+            paint.color = color
+            canvas.drawRect(
+                x * cw + 3f,
+                top + y * ch + 3f,
+                (x + 1) * cw - 3f,
+                top + (y + 1) * ch - 3f,
+                paint
+            )
+        }
+
+        outline(selectedX, selectedY, Color.WHITE, 5f)
+        outline(cursorX, cursorY, Color.YELLOW, 3f)
+
+        text.color = Color.WHITE
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = 25f
+        canvas.drawText(
+            "Territory Clash   Земля ${land(0)}   Армия ${army(0).toInt()}   Кредиты ${states[0].money.toInt()}   Ядерки ${states[0].nukes}",
+            14f,
+            31f,
+            text
+        )
+        text.textSize = 16f
+        canvas.drawText(
+            "Тап: выбрать/атаковать • порт: морской удар до 7 клеток • 1-5 стройки • N купить • K цель • M музыка",
+            14f,
+            58f,
+            text
+        )
+
+        drawToolbar(canvas, toolbarTop)
+
+        if (nukeTargetMode) {
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 21f
+            text.color = Color.rgb(255, 230, 80)
+            canvas.drawText("РЕЖИМ ЯДЕРНОЙ ЦЕЛИ: выбери вражескую клетку", width / 2f, 78f, text)
+        }
+
+        gameOver?.let {
+            paint.style = Paint.Style.FILL
+            paint.color = Color.argb(220, 0, 0, 0)
+            canvas.drawRect(0f, top, width.toFloat(), bottom, paint)
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 38f
+            text.color = Color.WHITE
+            canvas.drawText("$it — R для новой игры", width / 2f, (top + bottom) / 2f, text)
+        }
+    }
+
+    private fun drawStructure(
+        canvas: Canvas,
+        cell: Cell,
+        left: Float,
+        top: Float,
+        cw: Float,
+        ch: Float
+    ) {
+        if (cell.structure == STRUCT_NONE) return
+        val label = when (cell.structure) {
+            STRUCT_CITY -> "C"
+            STRUCT_FACTORY -> "F"
+            STRUCT_PORT -> "P"
+            STRUCT_FORT -> "D"
+            STRUCT_SILO -> "S"
+            else -> ""
+        }
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = min(cw, ch) * 0.28f
+        text.color = when (cell.structure) {
+            STRUCT_CITY -> Color.rgb(255, 245, 170)
+            STRUCT_FACTORY -> Color.rgb(230, 230, 230)
+            STRUCT_PORT -> Color.rgb(130, 235, 255)
+            STRUCT_FORT -> Color.rgb(255, 205, 120)
+            STRUCT_SILO -> Color.rgb(255, 120, 120)
+            else -> Color.WHITE
+        }
+        canvas.drawText(label, left + 4f, top + text.textSize + 1f, text)
+    }
+
+    private fun drawToolbar(canvas: Canvas, toolbarTop: Float) {
+        val labels = arrayOf(
+            "Город\n$COST_CITY",
+            "Фабрика\n$COST_FACTORY",
+            "Порт\n$COST_PORT",
+            "Форт\n$COST_FORT",
+            "Шахта\n$COST_SILO",
+            "Ядерка\n$COST_NUKE",
+            "ЦЕЛЬ",
+            if (music.muted) "Музыка OFF" else "Музыка ON"
+        )
+        val buttonW = width / labels.size.toFloat()
+        val buttonTop = toolbarTop + 5f
+        val buttonBottom = toolbarTop + 62f
+
+        for (i in labels.indices) {
+            paint.style = Paint.Style.FILL
+            paint.color = if (i == 6 && nukeTargetMode) {
+                Color.rgb(120, 75, 30)
+            } else {
+                Color.rgb(35, 43, 56)
+            }
+            canvas.drawRect(
+                i * buttonW + 2f,
+                buttonTop,
+                (i + 1) * buttonW - 2f,
+                buttonBottom,
+                paint
+            )
+
+            val parts = labels[i].split("\n")
+            text.textAlign = Paint.Align.CENTER
+            text.color = Color.WHITE
+            text.textSize = 14f
+            canvas.drawText(parts[0], i * buttonW + buttonW / 2f, buttonTop + 21f, text)
+            if (parts.size > 1) {
+                text.textSize = 12f
+                text.color = Color.LTGRAY
+                canvas.drawText(parts[1], i * buttonW + buttonW / 2f, buttonTop + 42f, text)
+            }
+        }
+
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = 18f
+        text.color = Color.WHITE
+        canvas.drawText("-   Атака ${(attackPercent * 100).toInt()}%   +", width / 2f, toolbarTop + 91f, text)
+
+        text.textSize = 14f
+        text.color = if (statusTimer > 0f) Color.rgb(205, 225, 255) else Color.LTGRAY
+        canvas.drawText(
+            if (statusTimer > 0f) status else "Выбери свою клетку и соседнюю цель",
+            width / 2f,
+            toolbarTop + 115f,
+            text
+        )
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        requestFocus()
+        if (event.action != MotionEvent.ACTION_DOWN) return true
+
+        val toolbarTop = height - 126f
+        if (event.y >= toolbarTop) {
+            handleToolbar(event.x, event.y, toolbarTop)
+            return true
+        }
+
+        val top = 82f
+        val bottom = toolbarTop - 4f
+        if (event.y !in top..bottom) return true
+
+        val x = (event.x / (width / cols.toFloat())).toInt().coerceIn(0, cols - 1)
+        val y = ((event.y - top) / ((bottom - top) / rows)).toInt().coerceIn(0, rows - 1)
+        cursorX = x
+        cursorY = y
+
+        if (nukeTargetMode) {
+            tryPlayerNuke(x, y)
+        } else {
+            activate(x, y)
+        }
+        return true
+    }
+
+    private fun handleToolbar(x: Float, y: Float, toolbarTop: Float) {
+        if (y <= toolbarTop + 64f) {
+            val index = (x / (width / 8f)).toInt().coerceIn(0, 7)
+            when (index) {
+                0 -> buildPlayerStructure(STRUCT_CITY, COST_CITY)
+                1 -> buildPlayerStructure(STRUCT_FACTORY, COST_FACTORY)
+                2 -> buildPlayerStructure(STRUCT_PORT, COST_PORT)
+                3 -> buildPlayerStructure(STRUCT_FORT, COST_FORT)
+                4 -> buildPlayerStructure(STRUCT_SILO, COST_SILO)
+                5 -> buyPlayerNuke()
+                6 -> toggleNukeMode()
+                7 -> {
+                    val on = music.toggle()
+                    flash(if (on) "Музыка включена" else "Музыка выключена")
+                }
+            }
+        } else if (y <= toolbarTop + 103f) {
+            attackPercent = if (x < width / 2f) {
+                max(0.10f, attackPercent - 0.10f)
+            } else {
+                min(0.90f, attackPercent + 0.10f)
+            }
+        }
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.action == MotionEvent.ACTION_SCROLL) {
+            attackPercent = (
+                attackPercent +
+                    if (event.getAxisValue(MotionEvent.AXIS_VSCROLL) > 0) 0.05f else -0.05f
+                ).coerceIn(0.10f, 0.90f)
+            return true
+        }
+        return super.onGenericMotionEvent(event)
+    }
+
+    override fun onKeyDown(code: Int, event: KeyEvent): Boolean {
+        when (code) {
+            KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_DPAD_LEFT -> cursorX = max(0, cursorX - 1)
+            KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_DPAD_RIGHT -> cursorX = min(cols - 1, cursorX + 1)
+            KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_DPAD_UP -> cursorY = max(0, cursorY - 1)
+            KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_DPAD_DOWN -> cursorY = min(rows - 1, cursorY + 1)
+
+            KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER -> {
+                if (nukeTargetMode) tryPlayerNuke(cursorX, cursorY) else activate(cursorX, cursorY)
+            }
+
+            KeyEvent.KEYCODE_1 -> buildPlayerStructure(STRUCT_CITY, COST_CITY)
+            KeyEvent.KEYCODE_2 -> buildPlayerStructure(STRUCT_FACTORY, COST_FACTORY)
+            KeyEvent.KEYCODE_3 -> buildPlayerStructure(STRUCT_PORT, COST_PORT)
+            KeyEvent.KEYCODE_4 -> buildPlayerStructure(STRUCT_FORT, COST_FORT)
+            KeyEvent.KEYCODE_5 -> buildPlayerStructure(STRUCT_SILO, COST_SILO)
+            KeyEvent.KEYCODE_N -> buyPlayerNuke()
+            KeyEvent.KEYCODE_K -> toggleNukeMode()
+            KeyEvent.KEYCODE_M -> music.toggle()
+
+            KeyEvent.KEYCODE_PLUS,
+            KeyEvent.KEYCODE_EQUALS,
+            KeyEvent.KEYCODE_NUMPAD_ADD -> attackPercent = min(0.90f, attackPercent + 0.10f)
+
+            KeyEvent.KEYCODE_MINUS,
+            KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> attackPercent = max(0.10f, attackPercent - 0.10f)
+
+            KeyEvent.KEYCODE_R -> reset()
+            KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_BACK -> {
+                nukeTargetMode = false
+                selectedX = -1
+                selectedY = -1
+            }
+
+            else -> return super.onKeyDown(code, event)
+        }
+        return true
+    }
+
+    private fun activate(x: Int, y: Int) {
+        if (gameOver != null) return
+        val cell = cells[y][x]
+        if (cell.terrain == WATER) {
+            flash("По воде ходить нельзя. Используй порт для морского удара.")
+            return
+        }
+
+        if (selectedX < 0) {
+            if (cell.owner == 0) {
+                selectedX = x
+                selectedY = y
+            }
+            return
+        }
+
+        if (x == selectedX && y == selectedY) {
+            selectedX = -1
+            selectedY = -1
+            return
+        }
+
+        if (canMove(selectedX, selectedY, x, y, 0)) {
+            move(selectedX, selectedY, x, y, 0, attackPercent)
+            if (cells[y][x].owner == 0) {
+                selectedX = x
+                selectedY = y
+            } else {
+                selectedX = -1
+                selectedY = -1
+            }
             checkEnd()
-        } else if (cells[y][x].owner==0) { selectedX=x; selectedY=y }
+        } else if (cell.owner == 0) {
+            selectedX = x
+            selectedY = y
+        } else {
+            flash("Цель вне досягаемости. Из порта можно бить по побережью до 7 клеток.")
+        }
     }
 
-    private fun move(sx:Int,sy:Int,tx:Int,ty:Int,id:Int,pct:Float) {
-        if (!adj(sx,sy,tx,ty)) return
-        val s=cells[sy][sx]; val t=cells[ty][tx]
-        if (s.owner != id) return
-        val amount=min(max(0f,s.troops-1f), max(1f,s.troops*pct))
-        if (amount<=0) return
-        s.troops-=amount
-        if (t.owner==id) t.troops=min(99f,t.troops+amount)
-        else if (amount>t.troops) { t.owner=id; t.troops=max(1f,amount-t.troops) }
-        else t.troops-=amount
+    private fun move(
+        sx: Int,
+        sy: Int,
+        tx: Int,
+        ty: Int,
+        id: Int,
+        pct: Float
+    ) {
+        if (!canMove(sx, sy, tx, ty, id)) return
+        val source = cells[sy][sx]
+        val target = cells[ty][tx]
+        if (source.owner != id || target.terrain != LAND) return
+
+        val amount = min(
+            max(0f, source.troops - 1f),
+            max(1f, source.troops * pct)
+        )
+        if (amount <= 0f) return
+
+        source.troops -= amount
+
+        if (target.owner == id) {
+            target.troops = min(250f, target.troops + amount)
+            return
+        }
+
+        val defense = effectiveDefense(target)
+        if (amount > defense) {
+            target.owner = id
+            target.troops = max(1f, amount - defense)
+            if (target.structure == STRUCT_SILO) target.structure = STRUCT_NONE
+        } else {
+            val multiplier = defenseMultiplier(target)
+            target.troops = max(0.5f, target.troops - amount / multiplier)
+        }
     }
 
-    private fun adj(a:Int,b:Int,x:Int,y:Int)=abs(a-x)+abs(b-y)==1
+    private fun canMove(sx: Int, sy: Int, tx: Int, ty: Int, id: Int): Boolean {
+        if (sx !in 0 until cols || tx !in 0 until cols || sy !in 0 until rows || ty !in 0 until rows) return false
+        val source = cells[sy][sx]
+        val target = cells[ty][tx]
+        if (source.owner != id || source.terrain != LAND || target.terrain != LAND) return false
 
-    private fun neighbors(x:Int,y:Int):List<Pair<Int,Int>> = buildList {
-        if(x>0)add(x-1 to y); if(x<cols-1)add(x+1 to y); if(y>0)add(x to y-1); if(y<rows-1)add(x to y+1)
+        if (abs(sx - tx) + abs(sy - ty) == 1) return true
+
+        if (source.structure == STRUCT_PORT && isCoastal(sx, sy) && isCoastal(tx, ty)) {
+            val distance = abs(sx - tx) + abs(sy - ty)
+            return distance in 2..7
+        }
+        return false
     }
 
-    private fun land(id:Int)=cells.sumOf { row -> row.count { it.owner==id } }
-    private fun army(id:Int):Float {
-        var total=0f
-        for(row in cells) for(cell in row) if(cell.owner==id) total+=cell.troops
+    private fun effectiveDefense(cell: Cell): Float = cell.troops * defenseMultiplier(cell)
+
+    private fun defenseMultiplier(cell: Cell): Float = when (cell.structure) {
+        STRUCT_FORT -> 1.80f
+        STRUCT_CITY -> 1.15f
+        else -> 1f
+    }
+
+    private fun buildPlayerStructure(structure: Int, cost: Int) {
+        val pos = selectedOwnedCell() ?: run {
+            flash("Сначала выбери свою клетку.")
+            return
+        }
+        val cell = cells[pos.second][pos.first]
+        if (cell.structure != STRUCT_NONE) {
+            flash("На этой клетке уже есть постройка.")
+            return
+        }
+        if (structure == STRUCT_PORT && !isCoastal(pos.first, pos.second)) {
+            flash("Порт можно строить только рядом с водой.")
+            return
+        }
+        if (states[0].money < cost) {
+            flash("Не хватает кредитов: нужно $cost.")
+            return
+        }
+
+        states[0].money -= cost
+        cell.structure = structure
+        flash(
+            when (structure) {
+                STRUCT_CITY -> "Город построен: больше дохода и прироста."
+                STRUCT_FACTORY -> "Фабрика построена: армия растёт быстрее."
+                STRUCT_PORT -> "Порт построен: доступна морская дальность 7 клеток."
+                STRUCT_FORT -> "Форт построен: защита клетки x1.8."
+                STRUCT_SILO -> "Ракетная шахта готова. Теперь можно купить ядерку."
+                else -> "Постройка готова."
+            }
+        )
+    }
+
+    private fun buyPlayerNuke() {
+        val pos = selectedOwnedCell() ?: run {
+            flash("Выбери свою ракетную шахту.")
+            return
+        }
+        if (cells[pos.second][pos.first].structure != STRUCT_SILO) {
+            flash("Ядерку можно собрать только в ракетной шахте.")
+            return
+        }
+        if (states[0].money < COST_NUKE) {
+            flash("Для ядерки нужно $COST_NUKE кредитов.")
+            return
+        }
+        states[0].money -= COST_NUKE
+        states[0].nukes++
+        flash("Ядерка готова. Нажми ЦЕЛЬ или K.")
+    }
+
+    private fun toggleNukeMode() {
+        if (states[0].nukes <= 0) {
+            flash("Нет готовых ядерок.")
+            nukeTargetMode = false
+            return
+        }
+        nukeTargetMode = !nukeTargetMode
+        flash(if (nukeTargetMode) "Выбери вражескую клетку для удара." else "Ядерный режим отменён.")
+    }
+
+    private fun tryPlayerNuke(x: Int, y: Int) {
+        if (states[0].nukes <= 0) {
+            nukeTargetMode = false
+            flash("Нет готовых ядерок.")
+            return
+        }
+        val target = cells[y][x]
+        if (target.terrain != LAND || target.owner == 0) {
+            flash("Выбери вражескую или нейтральную клетку.")
+            return
+        }
+
+        launchNuke(0, x, y)
+        nukeTargetMode = false
+        selectedX = -1
+        selectedY = -1
+        flash("Ядерный удар нанесён. Центр зоны стал нейтральным.")
+        checkEnd()
+    }
+
+    private fun launchNuke(id: Int, x: Int, y: Int) {
+        if (states[id].nukes <= 0) return
+        states[id].nukes--
+
+        for (yy in max(0, y - 1)..min(rows - 1, y + 1)) {
+            for (xx in max(0, x - 1)..min(cols - 1, x + 1)) {
+                val c = cells[yy][xx]
+                if (c.terrain != LAND) continue
+
+                if (xx == x && yy == y) {
+                    c.owner = NEUTRAL
+                    c.troops = 4f
+                    c.structure = STRUCT_NONE
+                } else {
+                    c.troops = max(1f, c.troops * 0.22f)
+                    if (c.structure != STRUCT_CITY && Random.nextFloat() < 0.65f) {
+                        c.structure = STRUCT_NONE
+                    }
+                }
+            }
+        }
+    }
+
+    private fun selectedOwnedCell(): Pair<Int, Int>? {
+        if (selectedX >= 0 && selectedY >= 0 && cells[selectedY][selectedX].owner == 0) {
+            return selectedX to selectedY
+        }
+        if (cells[cursorY][cursorX].owner == 0) {
+            return cursorX to cursorY
+        }
+        return null
+    }
+
+    private fun coastalTargetsFrom(x: Int, y: Int, id: Int): List<Pair<Int, Int>> {
+        if (cells[y][x].structure != STRUCT_PORT || !isCoastal(x, y)) return emptyList()
+        val out = mutableListOf<Pair<Int, Int>>()
+        for (ty in 0 until rows) for (tx in 0 until cols) {
+            if (cells[ty][tx].terrain != LAND || cells[ty][tx].owner == id || !isCoastal(tx, ty)) continue
+            val distance = abs(x - tx) + abs(y - ty)
+            if (distance in 2..7) out += tx to ty
+        }
+        return out
+    }
+
+    private fun isCoastal(x: Int, y: Int): Boolean {
+        if (cells[y][x].terrain != LAND) return false
+        return neighborsAll(x, y).any { cells[it.second][it.first].terrain == WATER }
+    }
+
+    private fun neighbors(x: Int, y: Int): List<Pair<Int, Int>> = buildList {
+        if (x > 0) add(x - 1 to y)
+        if (x < cols - 1) add(x + 1 to y)
+        if (y > 0) add(x to y - 1)
+        if (y < rows - 1) add(x to y + 1)
+    }
+
+    private fun neighborsAll(x: Int, y: Int): List<Pair<Int, Int>> = buildList {
+        for (dy in -1..1) for (dx in -1..1) {
+            if (dx == 0 && dy == 0) continue
+            val nx = x + dx
+            val ny = y + dy
+            if (nx in 0 until cols && ny in 0 until rows) add(nx to ny)
+        }
+    }
+
+    private fun countStructure(id: Int, structure: Int): Int {
+        var count = 0
+        for (row in cells) for (cell in row) {
+            if (cell.owner == id && cell.structure == structure) count++
+        }
+        return count
+    }
+
+    private fun land(id: Int): Int {
+        var total = 0
+        for (row in cells) for (cell in row) if (cell.owner == id) total++
         return total
     }
 
+    private fun army(id: Int): Float {
+        var total = 0f
+        for (row in cells) for (cell in row) if (cell.owner == id) total += cell.troops
+        return total
+    }
+
+    private fun flash(message: String) {
+        status = message
+        statusTimer = 3.5f
+    }
+
     private fun checkEnd() {
-        var player=false
-        val enemy=BooleanArray(factions)
-        for(row in cells) for(cell in row) if(cell.owner>=0) {
-            if(cell.owner==0) player=true else enemy[cell.owner]=true
+        if (land(0) == 0) {
+            gameOver = "Поражение"
+            return
         }
-        if(!player) gameOver="Поражение"
-        else if((1 until factions).none { enemy[it] }) gameOver="Победа!"
+        if ((1 until factions).all { land(it) == 0 }) {
+            gameOver = "Победа!"
+        }
     }
 }
