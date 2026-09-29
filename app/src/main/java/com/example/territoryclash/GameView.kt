@@ -19,9 +19,9 @@ class GameView(
     private val music: BackgroundMusic
 ) : View(context) {
 
-    private val cols = 30
-    private val rows = 17
-    private val nations = 5
+    private val cols = EuropeScenario.COLS
+    private val rows = EuropeScenario.ROWS
+    private val nations = 6
 
     private val map = Array(rows) { Array(cols) { Province() } }
     private val nation = Array(nations) { NationState() }
@@ -29,12 +29,26 @@ class GameView(
     private val battles = mutableListOf<Battle>()
 
     private val nationColors = intArrayOf(
-        Color.rgb(76, 112, 154),
-        Color.rgb(154, 77, 72),
-        Color.rgb(148, 119, 71),
-        Color.rgb(106, 91, 145),
-        Color.rgb(75, 125, 92)
+        Color.rgb(77, 104, 132),
+        Color.rgb(144, 82, 76),
+        Color.rgb(151, 124, 78),
+        Color.rgb(103, 91, 139),
+        Color.rgb(80, 119, 90),
+        Color.rgb(116, 105, 78)
     )
+
+    private var nationNames = arrayOf("Германия", "Франция", "Польша", "Италия", "СССР", "Великобритания")
+    private var nationTags = arrayOf("GER", "FRA", "POL", "ITA", "USSR", "UK")
+
+    private var screen = SCREEN_MAIN_MENU
+    private var selectedCountry = EuropeScenario.GERMANY
+    private var menuMusicOn = true
+
+    companion object {
+        private const val SCREEN_MAIN_MENU = 0
+        private const val SCREEN_COUNTRY_SELECT = 1
+        private const val SCREEN_GAME = 2
+    }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val text = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -63,6 +77,7 @@ class GameView(
         isFocusable = true
         isFocusableInTouchMode = true
         reset()
+        screen = SCREEN_MAIN_MENU
     }
 
     private fun reset() {
@@ -89,18 +104,12 @@ class GameView(
             )
         }
 
-        generateMap()
-
-        val starts = listOf(
-            4 to rows / 2,
-            cols - 5 to rows / 2,
-            cols / 2 to 3,
-            cols / 2 to rows - 4,
-            cols / 2 to rows / 2
-        )
+        val setup = EuropeScenario.build(map, selectedCountry)
+        nationNames = setup.names
+        nationTags = setup.tags
+        val starts = setup.starts
 
         starts.forEachIndexed { owner, (sx, sy) ->
-            createCountry(owner, sx, sy)
             createStartingArmy(owner, sx, sy)
         }
 
@@ -110,7 +119,7 @@ class GameView(
         cursorX = selectedProvinceX
         cursorY = selectedProvinceY
 
-        status = "HoI-lite 0.4: пехота, танки, авиация, снабжение и бои за контроль провинций."
+        status = "Европа 1936: командуй дивизиями, держи снабжение и ломай фронт противника."
         statusTimer = 8f
         lastFrame = System.nanoTime()
         invalidate()
@@ -207,6 +216,18 @@ class GameView(
         val now = System.nanoTime()
         val rawDt = ((now - lastFrame) / 1_000_000_000f).coerceIn(0f, 0.05f)
         lastFrame = now
+
+        if (screen == SCREEN_MAIN_MENU) {
+            drawMainMenu(canvas)
+            postInvalidateOnAnimation()
+            return
+        }
+
+        if (screen == SCREEN_COUNTRY_SELECT) {
+            drawCountrySelect(canvas)
+            postInvalidateOnAnimation()
+            return
+        }
 
         val dt = rawDt * speeds[speedIndex]
         if (statusTimer > 0f) statusTimer -= rawDt
@@ -760,6 +781,7 @@ class GameView(
 
         drawTopBar(canvas)
         drawMap(canvas, top, mapBottom, cw, ch)
+        drawCountryLabels(canvas, top, cw, ch)
         drawFrontLines(canvas, top, cw, ch)
         drawBattles(canvas, top, cw, ch)
         drawDivisions(canvas, top, cw, ch)
@@ -782,6 +804,236 @@ class GameView(
         }
     }
 
+
+    private fun drawMainMenu(canvas: Canvas) {
+        canvas.drawColor(Color.rgb(18, 23, 27))
+
+        paint.style = Paint.Style.FILL
+        paint.color = Color.rgb(28, 35, 40)
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+
+        val cx = width / 2f
+        val titleY = height * 0.26f
+
+        text.textAlign = Paint.Align.CENTER
+        text.color = Color.rgb(232, 235, 232)
+        text.textSize = 44f
+        text.isFakeBoldText = true
+        canvas.drawText("EUROPE 1936", cx, titleY, text)
+
+        text.textSize = 17f
+        text.isFakeBoldText = false
+        text.color = Color.rgb(164, 176, 182)
+        canvas.drawText("оперативная стратегия • дивизии • снабжение • фронт", cx, titleY + 34f, text)
+
+        val bw = min(420f, width * 0.48f)
+        val bh = 58f
+        val left = cx - bw / 2f
+        val firstY = titleY + 88f
+
+        drawMenuButton(canvas, left, firstY, bw, bh, "НОВАЯ КАМПАНИЯ", true)
+        drawMenuButton(canvas, left, firstY + 72f, bw, bh, if (music.muted) "МУЗЫКА: ВЫКЛ" else "МУЗЫКА: ВКЛ", false)
+
+        text.textSize = 12.5f
+        text.color = Color.rgb(118, 132, 140)
+        canvas.drawText("Версия 0.5 • Android", cx, height - 28f, text)
+    }
+
+    private fun drawMenuButton(
+        canvas: Canvas,
+        left: Float,
+        top: Float,
+        widthPx: Float,
+        heightPx: Float,
+        label: String,
+        primary: Boolean
+    ) {
+        paint.style = Paint.Style.FILL
+        paint.color = if (primary) Color.rgb(73, 91, 98) else Color.rgb(39, 47, 52)
+        canvas.drawRoundRect(left, top, left + widthPx, top + heightPx, 7f, 7f, paint)
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        paint.color = Color.rgb(105, 119, 124)
+        canvas.drawRoundRect(left, top, left + widthPx, top + heightPx, 7f, 7f, paint)
+
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = 16f
+        text.isFakeBoldText = primary
+        text.color = Color.rgb(232, 235, 235)
+        canvas.drawText(label, left + widthPx / 2f, top + heightPx * 0.62f, text)
+        text.isFakeBoldText = false
+    }
+
+    private fun handleMainMenuTouch(x: Float, y: Float) {
+        val cx = width / 2f
+        val titleY = height * 0.26f
+        val bw = min(420f, width * 0.48f)
+        val left = cx - bw / 2f
+        val firstY = titleY + 88f
+
+        if (x in left..(left + bw) && y in firstY..(firstY + 58f)) {
+            screen = SCREEN_COUNTRY_SELECT
+            invalidate()
+            return
+        }
+
+        val musicY = firstY + 72f
+        if (x in left..(left + bw) && y in musicY..(musicY + 58f)) {
+            menuMusicOn = music.toggle()
+            invalidate()
+        }
+    }
+
+    private fun drawCountrySelect(canvas: Canvas) {
+        canvas.drawColor(Color.rgb(18, 23, 27))
+
+        text.textAlign = Paint.Align.CENTER
+        text.color = Color.rgb(232, 235, 232)
+        text.textSize = 31f
+        text.isFakeBoldText = true
+        canvas.drawText("ВЫБЕРИ СТРАНУ", width / 2f, 54f, text)
+        text.isFakeBoldText = false
+
+        text.textSize = 13.5f
+        text.color = Color.rgb(157, 169, 177)
+        canvas.drawText("Кампания начинается в 1936 году.  Нажми на карточку страны.", width / 2f, 79f, text)
+
+        val names = arrayOf("Германия", "Франция", "Польша", "Италия", "СССР", "Великобритания")
+        val tags = arrayOf("GER", "FRA", "POL", "ITA", "USSR", "UK")
+        val colors = intArrayOf(
+            Color.rgb(85, 100, 112),
+            Color.rgb(84, 108, 142),
+            Color.rgb(145, 118, 75),
+            Color.rgb(105, 126, 89),
+            Color.rgb(143, 80, 76),
+            Color.rgb(111, 101, 80)
+        )
+
+        val columns = 3
+        val gap = 18f
+        val cardW = min(270f, (width - gap * 4f) / columns)
+        val cardH = min(150f, (height - 150f) / 2f - 14f)
+        val totalW = cardW * columns + gap * (columns - 1)
+        val startX = width / 2f - totalW / 2f
+        val startY = 108f
+
+        for (i in names.indices) {
+            val col = i % columns
+            val row = i / columns
+            val left = startX + col * (cardW + gap)
+            val top = startY + row * (cardH + gap)
+
+            paint.style = Paint.Style.FILL
+            paint.color = Color.rgb(31, 38, 43)
+            canvas.drawRoundRect(left, top, left + cardW, top + cardH, 9f, 9f, paint)
+
+            paint.color = colors[i]
+            canvas.drawRoundRect(left + 10f, top + 10f, left + 74f, top + 50f, 5f, 5f, paint)
+
+            text.textAlign = Paint.Align.CENTER
+            text.color = Color.WHITE
+            text.textSize = 15f
+            text.isFakeBoldText = true
+            canvas.drawText(tags[i], left + 42f, top + 36f, text)
+
+            text.textAlign = Paint.Align.LEFT
+            text.textSize = 19f
+            text.color = Color.rgb(229, 233, 234)
+            canvas.drawText(names[i], left + 88f, top + 38f, text)
+            text.isFakeBoldText = false
+
+            text.textSize = 11.5f
+            text.color = Color.rgb(156, 169, 176)
+            canvas.drawText(
+                when (i) {
+                    EuropeScenario.GERMANY -> "сильная промышленность и бронетехника"
+                    EuropeScenario.FRANCE -> "сильная оборона и укреплённый фронт"
+                    EuropeScenario.POLAND -> "сложная позиция между крупными державами"
+                    EuropeScenario.ITALY -> "горная война и Средиземноморье"
+                    EuropeScenario.USSR -> "большие резервы и длинный фронт"
+                    else -> "островная база, авиация и морские порты"
+                },
+                left + 16f,
+                top + 79f,
+                text
+            )
+
+            paint.style = Paint.Style.FILL
+            paint.color = Color.rgb(61, 73, 79)
+            canvas.drawRoundRect(left + 16f, top + cardH - 43f, left + cardW - 16f, top + cardH - 12f, 5f, 5f, paint)
+
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = 12.5f
+            text.color = Color.WHITE
+            canvas.drawText("НАЧАТЬ КАМПАНИЮ", left + cardW / 2f, top + cardH - 22f, text)
+        }
+
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = 12f
+        text.color = Color.rgb(135, 147, 153)
+        canvas.drawText("Назад: системная кнопка Back / Esc", 14f, height - 16f, text)
+    }
+
+    private fun handleCountrySelectTouch(x: Float, y: Float) {
+        val columns = 3
+        val gap = 18f
+        val cardW = min(270f, (width - gap * 4f) / columns)
+        val cardH = min(150f, (height - 150f) / 2f - 14f)
+        val totalW = cardW * columns + gap * (columns - 1)
+        val startX = width / 2f - totalW / 2f
+        val startY = 108f
+
+        for (i in 0 until 6) {
+            val col = i % columns
+            val row = i / columns
+            val left = startX + col * (cardW + gap)
+            val top = startY + row * (cardH + gap)
+
+            if (x in left..(left + cardW) && y in top..(top + cardH)) {
+                startCountry(i)
+                return
+            }
+        }
+    }
+
+    private fun startCountry(country: Int) {
+        selectedCountry = country.coerceIn(0, 5)
+        reset()
+        screen = SCREEN_GAME
+        speedIndex = 1
+        flash("Кампания началась: ${nationNames[0]}. Удерживай снабжение и управляй дивизиями.")
+        invalidate()
+    }
+
+    private fun drawCountryLabels(canvas: Canvas, top: Float, cw: Float, ch: Float) {
+        for (owner in 0 until nations) {
+            var sx = 0f
+            var sy = 0f
+            var count = 0
+            for (y in 0 until rows) {
+                for (x in 0 until cols) {
+                    if (map[y][x].owner == owner) {
+                        sx += x + 0.5f
+                        sy += y + 0.5f
+                        count++
+                    }
+                }
+            }
+
+            if (count < 3) continue
+            val cx = (sx / count) * cw
+            val cy = top + (sy / count) * ch
+
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = if (count > 25) 18f else 13f
+            text.isFakeBoldText = true
+            text.color = Color.argb(95, 240, 240, 235)
+            canvas.drawText(nationTags[owner], cx, cy, text)
+            text.isFakeBoldText = false
+        }
+    }
+
     private fun drawTopBar(canvas: Canvas) {
         paint.style = Paint.Style.FILL
         paint.color = Color.rgb(28, 34, 39)
@@ -796,7 +1048,7 @@ class GameView(
         text.color = Color.rgb(232, 235, 238)
         text.textSize = 20f
         text.isFakeBoldText = true
-        canvas.drawText("TERRITORY CLASH — COMMAND", 14f, 25f, text)
+        canvas.drawText("EUROPE 1936 — HIGH COMMAND", 14f, 25f, text)
 
         text.isFakeBoldText = false
         text.textSize = 13.5f
@@ -1257,20 +1509,27 @@ class GameView(
         )
     }
 
-    private fun ownerName(owner: Int): String = when (owner) {
-        0 -> "Вы"
-        1 -> "Красные"
-        2 -> "Золотые"
-        3 -> "Фиолетовые"
-        4 -> "Зелёные"
-        WarRules.NEUTRAL -> "нейтрал"
-        else -> "море"
+    private fun ownerName(owner: Int): String = when {
+        owner == WarRules.NEUTRAL -> "нейтрал"
+        owner == WarRules.WATER_OWNER -> "море"
+        owner in nationNames.indices -> if (owner == 0) "Вы — ${nationNames[owner]}" else nationNames[owner]
+        else -> "неизвестно"
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         requestFocus()
 
         if (event.actionMasked != MotionEvent.ACTION_DOWN) return true
+
+        if (screen == SCREEN_MAIN_MENU) {
+            handleMainMenuTouch(event.x, event.y)
+            return true
+        }
+
+        if (screen == SCREEN_COUNTRY_SELECT) {
+            handleCountrySelectTouch(event.x, event.y)
+            return true
+        }
 
         if (event.y <= 66f) {
             handleTopTouch(event.x)
@@ -1673,6 +1932,36 @@ class GameView(
     }
 
     override fun onKeyDown(code: Int, event: KeyEvent): Boolean {
+        if (screen == SCREEN_MAIN_MENU) {
+            if (code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_SPACE) {
+                screen = SCREEN_COUNTRY_SELECT
+                invalidate()
+                return true
+            }
+            if (code == KeyEvent.KEYCODE_M) {
+                menuMusicOn = music.toggle()
+                return true
+            }
+            return super.onKeyDown(code, event)
+        }
+
+        if (screen == SCREEN_COUNTRY_SELECT) {
+            when (code) {
+                KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_BACK -> {
+                    screen = SCREEN_MAIN_MENU
+                    invalidate()
+                    return true
+                }
+                KeyEvent.KEYCODE_1 -> startCountry(EuropeScenario.GERMANY)
+                KeyEvent.KEYCODE_2 -> startCountry(EuropeScenario.FRANCE)
+                KeyEvent.KEYCODE_3 -> startCountry(EuropeScenario.POLAND)
+                KeyEvent.KEYCODE_4 -> startCountry(EuropeScenario.ITALY)
+                KeyEvent.KEYCODE_5 -> startCountry(EuropeScenario.USSR)
+                KeyEvent.KEYCODE_6 -> startCountry(EuropeScenario.UK)
+            }
+            return true
+        }
+
         when (code) {
             KeyEvent.KEYCODE_A,
             KeyEvent.KEYCODE_DPAD_LEFT -> cursorX = max(0, cursorX - 1)
@@ -1705,11 +1994,17 @@ class GameView(
             KeyEvent.KEYCODE_M -> music.toggle()
             KeyEvent.KEYCODE_R -> reset()
 
-            KeyEvent.KEYCODE_ESCAPE,
-            KeyEvent.KEYCODE_BACK -> {
+            KeyEvent.KEYCODE_ESCAPE -> {
                 clearSelection()
                 nukeTargetMode = false
                 flash("Выделение снято.")
+            }
+
+            KeyEvent.KEYCODE_BACK -> {
+                speedIndex = 0
+                screen = SCREEN_MAIN_MENU
+                clearSelection()
+                invalidate()
             }
 
             KeyEvent.KEYCODE_PLUS,
